@@ -412,41 +412,41 @@ block），原遍历几乎无开销；缓存的 bbox 验证反而引入了额外
 
 ## 下一步
 
-1. 未插桩重复 O9+O11 短跑，以中位数确认收益。
+1. 未插桩重复 O9 短跑，以中位数确认收益。
 2. 探索差分 kernel（`fdderivs` 5.6% + `fderivs` 2.7% = 8.3%）的循环合并或向量化。
 3. 正式 `t=40` 长跑验证。
 
-### O11：bssn_rhs 自动数组改为 allocatable,save 预分配
+### R5：bssn_rhs 自动数组改为 allocatable,save 预分配
 
-状态：**保留**。
+状态：**已回退**。
 
 日期：2026-08-15。
 
-profiler 证据（`perf_o9` 采样）：`malloc` 1.48% + `cfree` 1.38% = 2.86%，`__memset_sve_zva64` 
-3.42%，`__memcpy_sve` 3.55%。`compute_rhs_bssn_` 声明了 40 个 `dimension(ex(1),ex(2),ex(3))`
-自动数组，每次调用隐式 malloc + memset + free。
+假设：`compute_rhs_bssn_` 声明了 40 个 `dimension(ex)` 自动数组，每次调用隐式
+malloc+memset+free。改为 `allocatable,save` 首次分配后复用，减少 malloc/cfree（2.86%）
+和 memset（3.42%）开销。
 
-修改：
+A/B 测试（`--bind-to core` 稳定绑核，消除 unbound 波动后）：
 
-- `src/bssn_rhs.f90`：将第 68-84 行的 40 个自动数组声明改为
-  `allocatable, save`，首次调用时分配，后续调用复用。增加 size 检查以处理
-  AMR 不同 level 的不同网格尺寸。
+| 版本 | Run 1 | Run 2 | Run 3 | Run 4 | 中位数 | 波动 |
+|---|---:|---:|---:|---:|---:|---:|
+| O9 | 60.22 | 60.45 | 60.54 | 60.52 | 60.52 | ±0.6% |
+| O11 | 60.82 | 60.51 | 60.17 | 60.44 | 60.48 | ±0.6% |
 
-短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、TwoPuncture cache：
+O9 中位数 60.52s vs O11 中位数 60.48s，差异 0.04s（0.07%），无统计意义。
+在稳定绑核下 O11 没有可测量的收益。之前的 "收益" 全是 unbound 调度波动的噪声。
 
-| 运行 | Before Evolve | Total Evolve | Total Running | 正确性 |
-|---|---:|---:|---:|---|
-| O9 perf 基线 | 3.74 s | 40.43 s | 44.17 s | — |
-| O11 `j98163` | 0.63 s | 39.57 s | 40.20 s | PASS, RMS=0 |
+额外发现：`--bind-to core`（60.5s）比 `--bind-to none`（中位数 45.3s）慢 33%。
+unbound 调度虽波动大（±13%），但中位数更快——owner-local 的非对称线程配置
+在不绑定下效果更好（空闲 rank 让出 CPU 给计算 rank）。
 
-相对 O9 perf 基线：Before Evolve -83.7%（首次分析阶段不再分配），Total Evolve -2.1%，
-Total Running -9.0%，端到端 -9.3%。正确性 PASS，四文件位级一致。
+决定：按"一次一项、无收益回退"原则恢复 `bssn_rhs.f90`。保持 unbound 调度。
 
 ## 下一步
 
-1. 未插桩重复 O9+O11 短跑，以中位数确认收益。
-2. 探索差分 kernel（`fdderivs` 5.6% + `fderivs` 2.7% = 8.3%）的循环合并或向量化。
-3. 正式 `t=40` 长跑验证。
+1. 探索差分 kernel（`fdderivs` 5.6% + `fderivs` 2.7% = 8.3%）的循环合并或向量化。
+2. 正式 `t=40` 长跑验证（unbound 调度，多次取中位数）。
+3. 考虑 MPI 通信优化（`opal_progress` 等待占 ~22%）。
 
 ## 后续记录模板
 

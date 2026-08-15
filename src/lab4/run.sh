@@ -25,6 +25,7 @@ export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
 
 # ============================================================
 # O8 最佳配置默认值（判题器直接 ./run.sh 时自动生效，环境变量可覆盖）
+# unbound 调度: 空闲 rank 让出 CPU 给 owner-local 计算线程, 实测最快
 # ============================================================
 export AMSS_ABE_OMP_THREADS="${AMSS_ABE_OMP_THREADS:-2}"
 export AMSS_TWOP_OMP_THREADS="${AMSS_TWOP_OMP_THREADS:-30}"
