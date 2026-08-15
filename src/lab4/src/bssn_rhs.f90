@@ -817,69 +817,46 @@
   SSA(2)=SYM
   SSA(3)=ANTI
 
-!!!!!!!!!advection term part
+!!!!!!!!!advection term part + Kreiss-Oliger dissipation (combined)
 
   call lopsided(ex,X,Y,Z,gxx,gxx_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,gxy,gxy_rhs,betax,betay,betaz,Symmetry,AAS)
-  call lopsided(ex,X,Y,Z,gxz,gxz_rhs,betax,betay,betaz,Symmetry,ASA)
   call lopsided(ex,X,Y,Z,gyy,gyy_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,gyz,gyz_rhs,betax,betay,betaz,Symmetry,SAA)
   call lopsided(ex,X,Y,Z,gzz,gzz_rhs,betax,betay,betaz,Symmetry,SSS)
 
-  call lopsided(ex,X,Y,Z,Axx,Axx_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,Axy,Axy_rhs,betax,betay,betaz,Symmetry,AAS)
-  call lopsided(ex,X,Y,Z,Axz,Axz_rhs,betax,betay,betaz,Symmetry,ASA)
-  call lopsided(ex,X,Y,Z,Ayy,Ayy_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,Ayz,Ayz_rhs,betax,betay,betaz,Symmetry,SAA)
-  call lopsided(ex,X,Y,Z,Azz,Azz_rhs,betax,betay,betaz,Symmetry,SSS)
+  call lopsided_kodis(ex,X,Y,Z,gxy,gxy_rhs,betax,betay,betaz,Symmetry,AAS,eps)
+  call lopsided_kodis(ex,X,Y,Z,gxz,gxz_rhs,betax,betay,betaz,Symmetry,ASA,eps)
+  call lopsided_kodis(ex,X,Y,Z,gyz,gyz_rhs,betax,betay,betaz,Symmetry,SAA,eps)
 
-  call lopsided(ex,X,Y,Z,chi,chi_rhs,betax,betay,betaz,Symmetry,SSS)
-  call lopsided(ex,X,Y,Z,trK,trK_rhs,betax,betay,betaz,Symmetry,SSS)
+  call lopsided_kodis(ex,X,Y,Z,Axx,Axx_rhs,betax,betay,betaz,Symmetry,SSS,eps)
+  call lopsided_kodis(ex,X,Y,Z,Axy,Axy_rhs,betax,betay,betaz,Symmetry,AAS,eps)
+  call lopsided_kodis(ex,X,Y,Z,Axz,Axz_rhs,betax,betay,betaz,Symmetry,ASA,eps)
+  call lopsided_kodis(ex,X,Y,Z,Ayy,Ayy_rhs,betax,betay,betaz,Symmetry,SSS,eps)
+  call lopsided_kodis(ex,X,Y,Z,Ayz,Ayz_rhs,betax,betay,betaz,Symmetry,SAA,eps)
+  call lopsided_kodis(ex,X,Y,Z,Azz,Azz_rhs,betax,betay,betaz,Symmetry,SSS,eps)
 
-  call lopsided(ex,X,Y,Z,Gamx,Gamx_rhs,betax,betay,betaz,Symmetry,ASS)
-  call lopsided(ex,X,Y,Z,Gamy,Gamy_rhs,betax,betay,betaz,Symmetry,SAS)
-  call lopsided(ex,X,Y,Z,Gamz,Gamz_rhs,betax,betay,betaz,Symmetry,SSA)
-!!
-  call lopsided(ex,X,Y,Z,Lap,Lap_rhs,betax,betay,betaz,Symmetry,SSS)
+  call lopsided_kodis(ex,X,Y,Z,chi,chi_rhs,betax,betay,betaz,Symmetry,SSS,eps)
+  call lopsided_kodis(ex,X,Y,Z,trK,trK_rhs,betax,betay,betaz,Symmetry,SSS,eps)
 
-  call lopsided(ex,X,Y,Z,betax,betax_rhs,betax,betay,betaz,Symmetry,ASS)
-  call lopsided(ex,X,Y,Z,betay,betay_rhs,betax,betay,betaz,Symmetry,SAS)
-  call lopsided(ex,X,Y,Z,betaz,betaz_rhs,betax,betay,betaz,Symmetry,SSA)
+  call lopsided_kodis(ex,X,Y,Z,Gamx,Gamx_rhs,betax,betay,betaz,Symmetry,ASS,eps)
+  call lopsided_kodis(ex,X,Y,Z,Gamy,Gamy_rhs,betax,betay,betaz,Symmetry,SAS,eps)
+  call lopsided_kodis(ex,X,Y,Z,Gamz,Gamz_rhs,betax,betay,betaz,Symmetry,SSA,eps)
 
-  call lopsided(ex,X,Y,Z,dtSfx,dtSfx_rhs,betax,betay,betaz,Symmetry,ASS)
-  call lopsided(ex,X,Y,Z,dtSfy,dtSfy_rhs,betax,betay,betaz,Symmetry,SAS)
-  call lopsided(ex,X,Y,Z,dtSfz,dtSfz_rhs,betax,betay,betaz,Symmetry,SSA)
+  call lopsided_kodis(ex,X,Y,Z,Lap,Lap_rhs,betax,betay,betaz,Symmetry,SSS,eps)
 
-  if(eps>0)then 
-! usual Kreiss-Oliger dissipation      
-  call kodis(ex,X,Y,Z,chi,chi_rhs,SSS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,trK,trK_rhs,SSS,Symmetry,eps)
+  call lopsided_kodis(ex,X,Y,Z,betax,betax_rhs,betax,betay,betaz,Symmetry,ASS,eps)
+  call lopsided_kodis(ex,X,Y,Z,betay,betay_rhs,betax,betay,betaz,Symmetry,SAS,eps)
+  call lopsided_kodis(ex,X,Y,Z,betaz,betaz_rhs,betax,betay,betaz,Symmetry,SSA,eps)
+
+  call lopsided_kodis(ex,X,Y,Z,dtSfx,dtSfx_rhs,betax,betay,betaz,Symmetry,ASS,eps)
+  call lopsided_kodis(ex,X,Y,Z,dtSfy,dtSfy_rhs,betax,betay,betaz,Symmetry,SAS,eps)
+  call lopsided_kodis(ex,X,Y,Z,dtSfz,dtSfz_rhs,betax,betay,betaz,Symmetry,SSA,eps)
+
+  if(eps>0)then
+! usual Kreiss-Oliger dissipation for gxx(=dxx+1), gyy(=dyy+1), gzz(=dzz+1)
+! these use dxx/dyy/dzz (not gxx/gyy/gzz) so cannot combine with lopsided
   call kodis(ex,X,Y,Z,dxx,gxx_rhs,SSS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,gxy,gxy_rhs,AAS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,gxz,gxz_rhs,ASA,Symmetry,eps)
   call kodis(ex,X,Y,Z,dyy,gyy_rhs,SSS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,gyz,gyz_rhs,SAA,Symmetry,eps)
   call kodis(ex,X,Y,Z,dzz,gzz_rhs,SSS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Axx,Axx_rhs,SSS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Axy,Axy_rhs,AAS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Axz,Axz_rhs,ASA,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Ayy,Ayy_rhs,SSS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Ayz,Ayz_rhs,SAA,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Azz,Azz_rhs,SSS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Gamx,Gamx_rhs,ASS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Gamy,Gamy_rhs,SAS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,Gamz,Gamz_rhs,SSA,Symmetry,eps)
-
-#if 1 
-!! bam does not apply dissipation on gauge variables
-  call kodis(ex,X,Y,Z,Lap,Lap_rhs,SSS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,betax,betax_rhs,ASS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,betay,betay_rhs,SAS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,betaz,betaz_rhs,SSA,Symmetry,eps)
-  call kodis(ex,X,Y,Z,dtSfx,dtSfx_rhs,ASS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,dtSfy,dtSfy_rhs,SAS,Symmetry,eps)
-  call kodis(ex,X,Y,Z,dtSfz,dtSfz_rhs,SSA,Symmetry,eps)
-#endif
 
   endif
 
