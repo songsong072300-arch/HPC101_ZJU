@@ -5,7 +5,7 @@ project(amss_ncku_lab LANGUAGES CXX Fortran)
 option(AMSS_ENABLE_GPU "Enable CUDA GPU build (ABEGPU target)" OFF)
 set(AMSS_OPT "-O3" CACHE STRING "C/C++/Fortran optimization level")
 set(AMSS_ARCH_FLAGS "" CACHE STRING "Architecture-specific compiler flags")
-option(AMSS_ENABLE_OPENMP "Link OpenMP to all executables" OFF)
+option(AMSS_ENABLE_OPENMP "Link OpenMP to all executables" ON)
 set(AMSS_MPI_CUDA_AWARE 0 CACHE STRING "Set MPI_CUDA_AWARE macro for ABEGPU (0/1)")
 set_property(CACHE AMSS_MPI_CUDA_AWARE PROPERTY STRINGS 0 1)
 

@@ -43,8 +43,8 @@ Finite_Diffenence_Method = "4th-order"             ## fixed in this trimmed lab 
 ## Setting the time evolutionary information
 
 Start_Evolution_Time     = 0.0                    ## start evolution time t0
-## NOTE: For CPU, set Final_Evolution_Time = 2.0  ## DEBUG
-Final_Evolution_Time = 2.0
+## NOTE: For CPU, set Final_Evolution_Time to 40.0, while GPU keeps it as 100.0
+Final_Evolution_Time     = 100.0 if GPU_Calculation == "yes" else 40.0  ## final evolution time t1
 Check_Time               = 1000.0
 Dump_Time                = 1000.0                  ## time inteval dT for dumping binary data
 D2_Dump_Time             = 1000.0                  ## dump the ascii data for 2d surface after dT'
