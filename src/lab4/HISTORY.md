@@ -448,6 +448,36 @@ unbound 调度虽波动大（±13%），但中位数更快——owner-local 的�
 2. 正式 `t=40` 长跑验证（unbound 调度，多次取中位数）。
 3. 考虑 MPI 通信优化（`opal_progress` 等待占 ~22%）。
 
+### O12：优化 symmetry_bd 避免全数组清零
+
+状态：**保留**。
+
+日期：2026-08-15。
+
+profiler 证据：`symmetry_bd_` self 0.73%，但其触发的 `__memset_sve_zva64` 3.42%
+和 `__memcpy_sve` 3.55% 中约一半来自 59 次 `symmetry_bd` 调用。原实现先
+`funcc = 0.d0`（全数组清零），再复制内部数据，再填充 ghost。
+
+修改：
+
+- `src/fmisc.f90`：`symmetry_bd` 不再全数组清零，改为先复制内部数据，
+  再只对 `SoA=0`（无对称）的轴清零 ghost，对 `SoA!=0` 的轴直接填充对称值。
+
+A/B 测试（`--bind-to core` 稳定绑核，各 5 次）：
+
+| 版本 | 中位数 | 波动 |
+|---|---:|---:|
+| O9（原 symmetry_bd） | 60.52 s | ±0.6% |
+| O12（优化后） | 56.62 s | ±0.3% |
+
+O12 比 O9 快 6.4%（-3.90s）。正确性 PASS（RMS=0，constraints PASS）。
+
+## 下一步
+
+1. 探索差分 kernel（`fdderivs` 5.6% + `fderivs` 2.7% = 8.3%）的循环合并或向量化。
+2. 正式 `t=40` 长跑验证（unbound 调度，多次取中位数）。
+3. 考虑 MPI 通信优化（`opal_progress` 等待占 ~22%）。
+
 ## 后续记录模板
 
 ```markdown

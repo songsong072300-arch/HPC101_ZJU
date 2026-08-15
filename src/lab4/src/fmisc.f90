@@ -420,7 +420,7 @@
   end function decide3d
 
 !---------------------------------------------------------------------------------------
-subroutine symmetry_bd(ord,extc,func,funcc,SoA)
+ subroutine symmetry_bd(ord,extc,func,funcc,SoA)
   implicit none
 
 !~~~~~~> input arguments
@@ -432,19 +432,46 @@ subroutine symmetry_bd(ord,extc,func,funcc,SoA)
 
   integer::i
 
-  funcc = 0.d0
+! Copy interior first (the part that matters), then fill ghosts.
+! Avoid zeroing the entire extended array; only zero ghost zones that
+! won't be explicitly filled when SoA component is 0 (no symmetry).
   funcc(1:extc(1),1:extc(2),1:extc(3)) = func
-   do i=0,ord-1
-      funcc(-i,1:extc(2),1:extc(3)) = funcc(i+1,1:extc(2),1:extc(3))*SoA(1)
-   enddo
-   do i=0,ord-1
-      funcc(:,-i,1:extc(3)) = funcc(:,i+1,1:extc(3))*SoA(2)
-   enddo
-   do i=0,ord-1
-      funcc(:,:,-i) = funcc(:,:,i+1)*SoA(3)
-   enddo
 
-end subroutine symmetry_bd
+! Zero ghost zones for axes with no symmetry (SoA=0 means mirror is 0)
+  if (SoA(1) == 0.d0) then
+    do i = 0, ord-1
+      funcc(-i,:,:) = 0.d0
+    enddo
+  endif
+  if (SoA(2) == 0.d0) then
+    do i = 0, ord-1
+      funcc(:,-i,:) = 0.d0
+    enddo
+  endif
+  if (SoA(3) == 0.d0) then
+    do i = 0, ord-1
+      funcc(:,:,-i) = 0.d0
+    enddo
+  endif
+
+! Fill ghost zones with symmetry values for axes with symmetry (SoA != 0)
+  if (SoA(1) /= 0.d0) then
+    do i=0,ord-1
+       funcc(-i,1:extc(2),1:extc(3)) = funcc(i+1,1:extc(2),1:extc(3))*SoA(1)
+    enddo
+  endif
+  if (SoA(2) /= 0.d0) then
+    do i=0,ord-1
+       funcc(:,-i,1:extc(3)) = funcc(:,i+1,1:extc(3))*SoA(2)
+    enddo
+  endif
+  if (SoA(3) /= 0.d0) then
+    do i=0,ord-1
+       funcc(:,:,-i) = funcc(:,:,i+1)*SoA(3)
+    enddo
+  endif
+
+ end subroutine symmetry_bd
 
 subroutine symmetry_tbd(ord,extc,func,funcc,SoA)
   implicit none
