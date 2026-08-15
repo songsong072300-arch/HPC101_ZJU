@@ -40,5 +40,21 @@ image/
 # not the debug t=2 outputs currently on disk)
 GW250118/
 
+# Golden reference (judge provides its own)
+golden/
+golden_cpu/
+
 # TwoPuncture initial-data binary (large)
 *.psid
+
+# Reports, docs, notes, test scripts (not part of OJ submission)
+*.md
+!README.md
+ques.txt
+image.png
+prompt/
+baseline_run.sh
+profile_abe.sh
+perf_analysis.sh
+quick_test.sh
+test_*.sh
