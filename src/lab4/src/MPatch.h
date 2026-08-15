@@ -30,6 +30,16 @@ public:
     void Interp_Points(MyList<var> *VarList,
                              int NN, double **XX,
                              double *Shellf, int Symmetry);
+    void Interp_Points_ReduceScatter(MyList<var> *VarList,
+                             int NN, double **XX,
+                             double *Shellf, int Symmetry);
+    void Interp_Points_Local(MyList<var> *VarList,
+                             int NN, double **XX,
+                             double *Shellf, int *LocalWeight, int Symmetry);
+    void Interp_Points_Impl(MyList<var> *VarList,
+                             int NN, double **XX,
+                             double *Shellf, int Symmetry, bool reduce_scatter,
+                             int *local_weight);
     bool Interp_ONE_Point(MyList<var> *VarList, double *XX,
                                  double *Shellf, int Symmetry);
     double getdX(int dir);

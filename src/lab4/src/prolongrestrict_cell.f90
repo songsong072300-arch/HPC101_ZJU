@@ -316,6 +316,8 @@
           return
   endif
 
+!$omp parallel do collapse(3) schedule(static) &
+!$omp private(cxI,cxB,cxT,fg,ya,X,Y,Z,tmp1,tmp2,ccp,ii,jj,kk,n,ddy)
   do k=kmino,kmaxo
   do j=jmino,jmaxo
   do i=imino,imaxo
@@ -1052,6 +1054,7 @@
   enddo
   enddo
   enddo
+!$omp end parallel do
 
   return
 
@@ -1176,6 +1179,8 @@
   endif
 
 !~~~~~~> restriction start...
+!$omp parallel do collapse(3) schedule(static) &
+!$omp private(cxI,cxB,cxT,ya,tmp1,tmp2)
   do k = kmino,kmaxo
    do j = jmino,jmaxo
     do i = imino,imaxo
@@ -1184,10 +1189,10 @@
        cxI(2) = j
        cxI(3) = k
 ! change to fine level reference
-!|---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*---| 
+!|---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*---|
 !|=======x===============x===============x===============x=======|
        cxI = 2*(cxI+lbc-1) - 1
-! change to array index      
+! change to array index
        cxI = cxI - lbf + 1
 
        if(any(cxI+2 > extf)) write(*,*)"error in restrict"
@@ -1205,12 +1210,13 @@
           tmp2=C1*(ya(:,:,1)+ya(:,:,4))+C2*(ya(:,:,2)+ya(:,:,3))
        endif
        tmp1= C1*(tmp2(:,1)+tmp2(:,4))+C2*(tmp2(:,2)+tmp2(:,3))
-       func(i,j,k)= C1*(tmp1(1)+tmp1(4))+C2*(tmp1(2)+tmp1(3))
+        func(i,j,k)= C1*(tmp1(1)+tmp1(4))+C2*(tmp1(2)+tmp1(3))
+     enddo
     enddo
    enddo
-  enddo
-  
-  return
+!$omp end parallel do
+
+   return
 
   end subroutine restrict3
 !--------------------------------------------------------------------------
@@ -2023,6 +2029,8 @@
   call symmetry_bd(3,extc,func,funcc,SoA)
      
 !~~~~~~> prolongation start...
+!$omp parallel do collapse(3) schedule(static) &
+!$omp private(cxI,ii,jj,kk,tmp1,tmp2)
   do k = kmino,kmaxo
    do j = jmino,jmaxo
     do i = imino,imaxo
@@ -2030,10 +2038,10 @@
        cxI(2) = j
        cxI(3) = k
 ! change to coarse level reference
-!|---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*---| 
+!|---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*---|
 !|=======x===============x===============x===============x=======|
        cxI = (cxI+lbf-1)/2
-! change to array index      
+! change to array index
        cxI = cxI - lbc + 1
 
        if(any(cxI+3 > extc)) write(*,*)"error in prolong"
@@ -2153,17 +2161,18 @@
              funf(i,j,k)= C1*tmp1(1)+C2*tmp1(2)+C3*tmp1(3)+C4*tmp1(4)+C5*tmp1(5)+C6*tmp1(6)
        else
              funf(i,j,k)= C6*tmp1(1)+C5*tmp1(2)+C4*tmp1(3)+C3*tmp1(4)+C2*tmp1(5)+C1*tmp1(6)
-       endif
+        endif
 #endif
     enddo
    enddo
   enddo
+!$omp end parallel do
 
   return
 
   end subroutine prolong3
 
-#else 
+#else
   subroutine prolong3(wei,llbc,uubc,extc,func,&
                       llbf,uubf,extf,funf,&
                       llbp,uubp,SoA,Symmetry)
@@ -2439,6 +2448,8 @@
   call symmetry_bd(2,extf,funf,funff,SoA)
 
 !~~~~~~> restriction start...
+!$omp parallel do collapse(3) schedule(static) &
+!$omp private(cxI,tmp1,tmp2)
   do k = kmino,kmaxo
    do j = jmino,jmaxo
     do i = imino,imaxo
@@ -2447,10 +2458,10 @@
        cxI(2) = j
        cxI(3) = k
 ! change to fine level reference
-!|---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*---| 
+!|---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*--- ---*---|
 !|=======x===============x===============x===============x=======|
        cxI = 2*(cxI+lbc-1) - 1
-! change to array index      
+! change to array index
        cxI = cxI - lbf + 1
 
        if(any(cxI+3 > extf)) write(*,*)"error in restrict"
@@ -2462,7 +2473,8 @@
     enddo
    enddo
   enddo
-  
+!$omp end parallel do
+
   return
 
   end subroutine restrict3

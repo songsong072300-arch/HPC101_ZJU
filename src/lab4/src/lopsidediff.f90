@@ -40,7 +40,7 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
 
 !~~~~~~> local variables:
 ! note index -2,-1,0, so we have 3 extra points
-  real*8,dimension(-2:ex(1),-2:ex(2),-2:ex(3))   :: fh
+  real*8, dimension(:,:,:), allocatable, save :: fh
   integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
   real*8 :: dX,dY,dZ
   real*8 :: d12dx,d12dy,d12dz,d2dx,d2dy,d2dz
@@ -52,6 +52,13 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
   dX = X(2)-X(1)
   dY = Y(2)-Y(1)
   dZ = Z(2)-Z(1)
+
+  if (.not. allocated(fh)) then
+    allocate(fh(-2:ex(1),-2:ex(2),-2:ex(3)))
+  elseif (ubound(fh,1) /= ex(1) .or. ubound(fh,2) /= ex(2) .or. ubound(fh,3) /= ex(3)) then
+    deallocate(fh)
+    allocate(fh(-2:ex(1),-2:ex(2),-2:ex(3)))
+  endif
 
   d12dx = ONE/F12/dX
   d12dy = ONE/F12/dY
@@ -76,6 +83,7 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
 
 ! upper bound set ex-1 only for efficiency, 
 ! the loop body will set ex 0 also
+!$omp parallel do collapse(3) schedule(static)
   do k=1,ex(3)-1
   do j=1,ex(2)-1
   do i=1,ex(1)-1
@@ -325,6 +333,7 @@ subroutine lopsided(ex,X,Y,Z,f,f_rhs,Sfx,Sfy,Sfz,Symmetry,SoA)
   enddo
   enddo
   enddo
+!$omp end parallel do
 
   return
 

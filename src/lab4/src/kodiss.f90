@@ -36,7 +36,7 @@ double precision,intent(in),dimension(ex(1),ex(2),ex(3))::f
 double precision,intent(inout),dimension(ex(1),ex(2),ex(3))::f_rhs
 real*8,intent(in) :: eps
 ! local variables
-real*8,dimension(-2:ex(1),-2:ex(2),-2:ex(3))   :: fh
+real*8, dimension(:,:,:), allocatable, save :: fh
 integer :: imin,jmin,kmin,imax,jmax,kmax
 integer :: i,j,k
 real*8  :: dX,dY,dZ
@@ -49,6 +49,13 @@ integer, parameter :: NO_SYMM=0, OCTANT=2
   dX = X(2)-X(1)
   dY = Y(2)-Y(1)
   dZ = Z(2)-Z(1)
+
+  if (.not. allocated(fh)) then
+    allocate(fh(-2:ex(1),-2:ex(2),-2:ex(3)))
+  elseif (ubound(fh,1) /= ex(1) .or. ubound(fh,2) /= ex(2) .or. ubound(fh,3) /= ex(3)) then
+    deallocate(fh)
+    allocate(fh(-2:ex(1),-2:ex(2),-2:ex(3)))
+  endif
   
   imax = ex(1)
   jmax = ex(2)
@@ -64,6 +71,7 @@ integer, parameter :: NO_SYMM=0, OCTANT=2
 
   call symmetry_bd(3,ex,f,fh,SoA)
 
+!$omp parallel do collapse(3) schedule(static)
   do k=1,ex(3)
   do j=1,ex(2)
   do i=1,ex(1)
@@ -115,6 +123,7 @@ integer, parameter :: NO_SYMM=0, OCTANT=2
   enddo
   enddo
   enddo
+!$omp end parallel do
 
   return
 

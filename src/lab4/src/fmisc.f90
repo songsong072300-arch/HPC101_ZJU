@@ -672,9 +672,9 @@ end subroutine d2dump
 
 !~~~~~~> Other parameter:
 
-  integer :: m,n,ns
-  real*8, dimension(ordn) :: c,d,den,ho
-  real*8 :: dif,dift
+  integer :: i,m,n,ns
+  real*8, dimension(ordn) :: c,d,ho
+  real*8 :: den,dif,dift
 
 !~~~~~~>
 
@@ -698,15 +698,17 @@ end subroutine d2dump
   y=ya(ns)
   ns=ns-1
   do m=1,n-1
-    den(1:n-m)=ho(1:n-m)-ho(1+m:n)
-    if (any(den(1:n-m) == 0.0))then
-      write(*,*) 'failure in polint for point',x
-      write(*,*) 'with input points: ',xa
-      stop
-    endif
-    den(1:n-m)=(c(2:n-m+1)-d(1:n-m))/den(1:n-m)
-    d(1:n-m)=ho(1+m:n)*den(1:n-m)
-    c(1:n-m)=ho(1:n-m)*den(1:n-m)
+    do i=1,n-m
+      den=ho(i)-ho(i+m)
+      if (den == 0.0)then
+        write(*,*) 'failure in polint for point',x
+        write(*,*) 'with input points: ',xa
+        stop
+      endif
+      den=(c(i+1)-d(i))/den
+      d(i)=ho(i+m)*den
+      c(i)=ho(i)*den
+    enddo
     if (2*ns < n-m) then
       dy=c(ns+1)
     else

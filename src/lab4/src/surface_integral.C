@@ -9,6 +9,8 @@
 #include <fstream>
 #include <strstream>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 using namespace std;
 #include <mpi.h>
@@ -892,7 +894,37 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
 
   // we have assumed there is only one box on this level,
   // so we do not need loop boxes
+#ifdef USE_GPU
   GH->PatL[lev]->data->Interp_Points(DG_List, n_tot, pox, shellf, Symmetry);
+#else
+  const char *surface_collective = std::getenv("AMSS_SURFACE_COLLECTIVE");
+  const bool use_owner_local = surface_collective != nullptr &&
+      std::strcmp(surface_collective, "owner_local") == 0;
+  const bool use_allreduce = surface_collective != nullptr &&
+      std::strcmp(surface_collective, "allreduce") == 0;
+  const bool use_reduce_scatter = !use_owner_local && !use_allreduce;
+  if (surface_collective != nullptr && use_reduce_scatter &&
+      std::strcmp(surface_collective, "reduce_scatter") != 0)
+  {
+    if (myrank == 0)
+      cerr << "AMSS_SURFACE_COLLECTIVE must be reduce_scatter, allreduce, or owner_local" << endl;
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+
+  int *local_weight = nullptr;
+  if (use_owner_local)
+  {
+    local_weight = new int[n_tot];
+    GH->PatL[lev]->data->Interp_Points_Local(
+        DG_List, n_tot, pox, shellf, local_weight, Symmetry);
+  }
+  else if (use_reduce_scatter)
+    GH->PatL[lev]->data->Interp_Points_ReduceScatter(
+        DG_List, n_tot, pox, shellf, Symmetry);
+  else
+    GH->PatL[lev]->data->Interp_Points(
+        DG_List, n_tot, pox, shellf, Symmetry);
+#endif
 
   double Mass_out = 0;
   double ang_outx, ang_outy, ang_outz;
@@ -916,6 +948,13 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
     Nmin = myrank * mp + Lp;
     Nmax = Nmin + mp - 1;
   }
+#ifndef USE_GPU
+  if (use_owner_local)
+  {
+    Nmin = 0;
+    Nmax = n_tot - 1;
+  }
+#endif
 
   double Chi, Psi;
   double Gxx, Gxy, Gxz, Gyy, Gyz, Gzz;
@@ -925,23 +964,32 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
   int i;
   for (n = Nmin; n <= Nmax; n++)
   {
+#ifndef USE_GPU
+    if (use_owner_local && local_weight[n] == 0)
+      continue;
+#endif
+#ifdef USE_GPU
+    const int local_n = n;
+#else
+    const int local_n = use_reduce_scatter ? n - Nmin : n;
+#endif
     //       need round off always
     i = int(n / N_phi); // int(1.723) = 1, int(-1.732) = -1
 
-    Chi = shellf[InList * n + 3]; // chi in fact
-    TRK = shellf[InList * n + 4];
-    Gxx = shellf[InList * n + 5] + 1.0;
-    Gxy = shellf[InList * n + 6];
-    Gxz = shellf[InList * n + 7];
-    Gyy = shellf[InList * n + 8] + 1.0;
-    Gyz = shellf[InList * n + 9];
-    Gzz = shellf[InList * n + 10] + 1.0;
-    axx = shellf[InList * n + 11];
-    axy = shellf[InList * n + 12];
-    axz = shellf[InList * n + 13];
-    ayy = shellf[InList * n + 14];
-    ayz = shellf[InList * n + 15];
-    azz = shellf[InList * n + 16];
+    Chi = shellf[InList * local_n + 3]; // chi in fact
+    TRK = shellf[InList * local_n + 4];
+    Gxx = shellf[InList * local_n + 5] + 1.0;
+    Gxy = shellf[InList * local_n + 6];
+    Gxz = shellf[InList * local_n + 7];
+    Gyy = shellf[InList * local_n + 8] + 1.0;
+    Gyz = shellf[InList * local_n + 9];
+    Gzz = shellf[InList * local_n + 10] + 1.0;
+    axx = shellf[InList * local_n + 11];
+    axy = shellf[InList * local_n + 12];
+    axz = shellf[InList * local_n + 13];
+    ayy = shellf[InList * local_n + 14];
+    ayz = shellf[InList * local_n + 15];
+    azz = shellf[InList * local_n + 16];
 
     Chi = 1.0 / (1.0 + Chi); // exp(4*phi)
     Psi = Chi * sqrt(Chi);   // Psi^6
@@ -949,7 +997,7 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
 // Chi^2 corresponds to metric determinant
 // but this factor has been considered in f_admmass_bssn
     // wtcostheta is even function respect costheta
-    Mass_out = Mass_out + (shellf[InList * n] * nx_g[n] + shellf[InList * n + 1] * ny_g[n] + shellf[InList * n + 2] * nz_g[n]) * wtcostheta[i];
+    Mass_out = Mass_out + (shellf[InList * local_n] * nx_g[n] + shellf[InList * local_n + 1] * ny_g[n] + shellf[InList * local_n + 2] * nz_g[n]) * wtcostheta[i];
 
     gupzz = Gxx * Gyy * Gzz + Gxy * Gyz * Gxz + Gxz * Gxy * Gyz -
             Gxz * Gyy * Gxz - Gxy * Gxy * Gzz - Gxx * Gyz * Gyz;
@@ -1009,15 +1057,19 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
     }
   }
 
-  MPI_Allreduce(&Mass_out, &mass, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-  MPI_Allreduce(&ang_outx, &sx, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(&ang_outy, &sy, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(&ang_outz, &sz, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-  MPI_Allreduce(&p_outx, &px, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(&p_outy, &py, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(&p_outz, &pz, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  // Preserve the seven independent sums while using one synchronization.
+  const double local_integrals[7] = {
+      Mass_out, p_outx, p_outy, p_outz, ang_outx, ang_outy, ang_outz};
+  double global_integrals[7];
+  MPI_Allreduce(local_integrals, global_integrals, 7, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD);
+  mass = global_integrals[0];
+  px = global_integrals[1];
+  py = global_integrals[2];
+  pz = global_integrals[3];
+  sx = global_integrals[4];
+  sy = global_integrals[5];
+  sz = global_integrals[6];
   mass = mass * rex * rex * dphi * factor;
 
   sx = sx * rex * rex * dphi * (1.0 / PI) * factor;
@@ -1039,6 +1091,9 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
   delete[] pox[0];
   delete[] pox[1];
   delete[] pox[2];
+#ifndef USE_GPU
+  delete[] local_weight;
+#endif
   delete[] shellf;
   DG_List->clearList();
 }
@@ -1241,15 +1296,18 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
         }
     }
 
-    MPI_Allreduce(&Mass_out, &mass, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-
-    MPI_Allreduce(&ang_outx, &sx, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(&ang_outy, &sy, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(&ang_outz, &sz, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-
-    MPI_Allreduce(&p_outx, &px, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(&p_outy, &py, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
-    MPI_Allreduce(&p_outz, &pz, 1, MPI_DOUBLE, MPI_SUM, Comm_here);
+    const double local_integrals[7] = {
+        Mass_out, p_outx, p_outy, p_outz, ang_outx, ang_outy, ang_outz};
+    double global_integrals[7];
+    MPI_Allreduce(local_integrals, global_integrals, 7, MPI_DOUBLE, MPI_SUM,
+                  Comm_here);
+    mass = global_integrals[0];
+    px = global_integrals[1];
+    py = global_integrals[2];
+    pz = global_integrals[3];
+    sx = global_integrals[4];
+    sy = global_integrals[5];
+    sz = global_integrals[6];
 
     mass = mass * rex * rex * dphi * factor;
 

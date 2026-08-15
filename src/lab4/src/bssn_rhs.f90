@@ -179,6 +179,7 @@
                                                     -   gxz * betayy     !rhs for gij
 
 ! invert tilted metric
+!$omp parallel workshare
   gupzz =  gxx * gyy * gzz + gxy * gyz * gxz + gxz * gxy * gyz - &
            gxz * gyy * gxz - gxy * gxy * gzz - gxx * gyz * gyz
   gupxx =   ( gyy * gzz - gyz * gyz ) / gupzz
@@ -187,6 +188,7 @@
   gupyy =   ( gxx * gzz - gxz * gxz ) / gupzz
   gupyz = - ( gxx * gyz - gxy * gxz ) / gupzz
   gupzz =   ( gxx * gyy - gxy * gxy ) / gupzz
+!$omp end parallel workshare
 
   if(co == 0)then
 ! Gam^i_Res = Gam^i + gup^ij_,j
@@ -220,6 +222,7 @@
   endif
 
 ! second kind of connection
+!$omp parallel workshare
   Gamxxx =HALF*( gupxx*gxxx + gupxy*(TWO*gxyx - gxxy ) + gupxz*(TWO*gxzx - gxxz ))
   Gamyxx =HALF*( gupxy*gxxx + gupyy*(TWO*gxyx - gxxy ) + gupyz*(TWO*gxzx - gxxz ))
   Gamzxx =HALF*( gupxz*gxxx + gupyz*(TWO*gxyx - gxxy ) + gupzz*(TWO*gxzx - gxxz ))
@@ -268,6 +271,7 @@
           (gupxy * gupyz       + gupyy * gupxz)* Axy                       + &
           (gupxy * gupzz       + gupyz * gupxz)* Axz                       + &
           (gupyy * gupzz       + gupyz * gupyz)* Ayz
+!$omp end parallel workshare
 
 ! Right hand side for Gam^i without shift terms...
   call fderivs(ex,Lap,Lapx,Lapy,Lapz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)

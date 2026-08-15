@@ -30,7 +30,7 @@
 !~~~~~~ other variables
 
   real*8 :: dX,dY,dZ
-  real*8,dimension(-1:ex(1),-1:ex(2),-1:ex(3))   :: fh
+  real*8, dimension(:,:,:), allocatable, save :: fh
   real*8, dimension(3) :: SoA
   integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
   real*8 :: d12dx,d12dy,d12dz,d2dx,d2dy,d2dz
@@ -42,6 +42,13 @@
   dX = X(2)-X(1)
   dY = Y(2)-Y(1)
   dZ = Z(2)-Z(1)
+
+  if (.not. allocated(fh)) then
+    allocate(fh(-1:ex(1),-1:ex(2),-1:ex(3)))
+  elseif (ubound(fh,1) /= ex(1) .or. ubound(fh,2) /= ex(2) .or. ubound(fh,3) /= ex(3)) then
+    deallocate(fh)
+    allocate(fh(-1:ex(1),-1:ex(2),-1:ex(3)))
+  endif
 
   imax = ex(1)
   jmax = ex(2)
@@ -72,6 +79,7 @@
   fy = ZEO
   fz = ZEO
 
+!$omp parallel do collapse(3) schedule(static)
   do k=1,ex(3)-1
   do j=1,ex(2)-1
   do i=1,ex(1)-1
@@ -173,6 +181,7 @@
   enddo
   enddo
   enddo
+!$omp end parallel do
 
   return
 
@@ -421,7 +430,7 @@
 
 !~~~~~~ other variables
   real*8 :: dX,dY,dZ
-  real*8,dimension(-1:ex(1),-1:ex(2),-1:ex(3))   :: fh
+  real*8, dimension(:,:,:), allocatable, save :: fh
   real*8, dimension(3) :: SoA
   integer :: imin,jmin,kmin,imax,jmax,kmax,i,j,k
   real*8  :: Sdxdx,Sdydy,Sdzdz,Fdxdx,Fdydy,Fdzdz
@@ -435,6 +444,13 @@
   dX = X(2)-X(1)
   dY = Y(2)-Y(1)
   dZ = Z(2)-Z(1)
+
+  if (.not. allocated(fh)) then
+    allocate(fh(-1:ex(1),-1:ex(2),-1:ex(3)))
+  elseif (ubound(fh,1) /= ex(1) .or. ubound(fh,2) /= ex(2) .or. ubound(fh,3) /= ex(3)) then
+    deallocate(fh)
+    allocate(fh(-1:ex(1),-1:ex(2),-1:ex(3)))
+  endif
 
   imax = ex(1)
   jmax = ex(2)
@@ -476,6 +492,7 @@
   fxz = ZEO
   fyz = ZEO
 
+!$omp parallel do collapse(3) schedule(static)
   do k=1,ex(3)-1
   do j=1,ex(2)-1
   do i=1,ex(1)-1
@@ -597,6 +614,7 @@
    enddo
    enddo
    enddo
+!$omp end parallel do
 
   return
 

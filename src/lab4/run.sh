@@ -6,6 +6,10 @@
 #   AMSS_OUTPUT_ROOT  run directory parent  (default: <lab4>)
 #   AMSS_CACHE_DIR    TwoPuncture cache root (default: <lab4>/twopuncture_cache)
 #   AMSS_MPIEXEC      MPI launcher          (default: mpiexec)
+#   AMSS_ABE_MPI_PROCESSES  MPI ranks used by ABE (default: AMSS_NCKU_Input.py)
+#   AMSS_ABE_OMP_THREADS  OpenMP threads per ABE MPI rank (default: 1)
+#   AMSS_SURFACE_COLLECTIVE  reduce_scatter (default), allreduce, or owner_local
+#   AMSS_SURFACE_OMP_THREADS  threads for owner-local surface interpolation
 set -euo pipefail
 
 # Ansorg-TwoPuncture allocates large Fortran automatic arrays.

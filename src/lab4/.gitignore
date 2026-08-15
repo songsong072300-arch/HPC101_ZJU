@@ -1,9 +1,45 @@
+# Build artifacts
 build/
+
+# Python
 __pycache__/
 *.pyc
-GW250118*/
+
+# Per lab4.md submission rules: do not submit
+**/binary_output/
 twopuncture_cache/
+*.bin
+
+# Profiler raw data directories (per lab4.md submission rules)
+profiling_results/
+test_archives/
+
+# Core dumps
+core.*
+
+# Object / module files
 *.o
+*.mod
+
+# Job output logs (keep Error.log per lab4.md submission requirements)
+*.out
 *.log
+!Error.log
+
+# User-generated golden copy (debug only)
+golden_cpu/
+
+# IDE
 .vscode/
-.out
+
+# Course documents (excluded per user choice - copyright)
+lab4.md
+image/
+
+# Compiled executables staged into run directories
+GW250118/AMSS_NCKU_output/ABE
+GW250118/AMSS_NCKU_output/ABEGPU
+GW250118/AMSS_NCKU_output/TwoPunctureABE
+
+# TwoPuncture initial-data binary (large)
+*.psid

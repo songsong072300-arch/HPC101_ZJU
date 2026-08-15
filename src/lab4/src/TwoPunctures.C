@@ -26,6 +26,7 @@ using namespace std;
 #include <complex.h>
 #endif
 
+#include <omp.h>
 #include "TwoPunctures.h"
 
 TwoPunctures::TwoPunctures(double mp, double mm, double b,
@@ -59,6 +60,62 @@ TwoPunctures::TwoPunctures(double mp, double mm, double b,
   F = dvector(0, ntotal - 1);
   allocate_derivs(&u, ntotal);
   allocate_derivs(&v, ntotal);
+
+  // Pre-allocate workspace for LineRelax / ThomasAlgorithm hot path.
+  // One set per OpenMP thread (flat buffer indexed by tid * ws_nmax).
+#ifdef _OPENMP
+  ws_nthreads = omp_get_max_threads();
+#else
+  ws_nthreads = 1;
+#endif
+  ws_nmax = (n1 > n2) ? n1 : n2;
+  ws_diag = new double[ws_nthreads * ws_nmax];
+  ws_e    = new double[ws_nthreads * ws_nmax];
+  ws_f    = new double[ws_nthreads * ws_nmax];
+  ws_b    = new double[ws_nthreads * ws_nmax];
+  ws_x    = new double[ws_nthreads * ws_nmax];
+  ws_l    = new double[ws_nthreads * ws_nmax];
+  ws_u    = new double[ws_nthreads * ws_nmax];
+  ws_d    = new double[ws_nthreads * ws_nmax];
+  ws_y    = new double[ws_nthreads * ws_nmax];
+
+  // Pre-allocated derivs for JFD_times_dv etc. (nvar = 1, tiny but high-frequency)
+  allocate_derivs(&ws_dU, nvar);
+  allocate_derivs(&ws_U, nvar);
+  ws_values = new double[nvar];
+
+  // Precompute trig tables: al = Pi*(2i+1)/(2*n1), be = Pi*(2j+1)/(2*n2).
+  // These are recomputed millions of times in F_of_v / J_times_dv / JFD_times_dv.
+  pc_sin_al  = new double[n1];
+  pc_cos_al  = new double[n1];
+  pc_Am1     = new double[n1];
+  pc_sin_al3 = new double[n1];
+  pc_sin_be  = new double[n2];
+  pc_cos_be  = new double[n2];
+  pc_sin_be3 = new double[n2];
+  pc_fac     = new double[(size_t)n1 * n2];
+
+  for (int i = 0; i < n1; i++)
+  {
+    double al = Pih * (2 * i + 1) / n1;
+    double sa = sin(al);
+    double ca = cos(al);
+    pc_sin_al[i]  = sa;
+    pc_cos_al[i]  = ca;       // A = -cos(al), so cos_al = -A
+    pc_Am1[i]     = -ca - 1;  // Am1 = A - 1 = -cos(al) - 1
+    pc_sin_al3[i] = sa * sa * sa;
+  }
+  for (int j = 0; j < n2; j++)
+  {
+    double be = Pih * (2 * j + 1) / n2;
+    double sb = sin(be);
+    pc_sin_be[j]  = sb;
+    pc_cos_be[j]  = cos(be);
+    pc_sin_be3[j] = sb * sb * sb;
+  }
+  for (int i = 0; i < n1; i++)
+    for (int j = 0; j < n2; j++)
+      pc_fac[(size_t)i * n2 + j] = pc_sin_al3[i] * pc_sin_be3[j];
 }
 
 TwoPunctures::~TwoPunctures()
@@ -66,6 +123,29 @@ TwoPunctures::~TwoPunctures()
   free_dvector(F, 0, ntotal - 1);
   free_derivs(&u, ntotal);
   free_derivs(&v, ntotal);
+
+  delete[] ws_diag;
+  delete[] ws_e;
+  delete[] ws_f;
+  delete[] ws_b;
+  delete[] ws_x;
+  delete[] ws_l;
+  delete[] ws_u;
+  delete[] ws_d;
+  delete[] ws_y;
+
+  free_derivs(&ws_dU, 1);
+  free_derivs(&ws_U, 1);
+  delete[] ws_values;
+
+  delete[] pc_sin_al;
+  delete[] pc_cos_al;
+  delete[] pc_Am1;
+  delete[] pc_sin_al3;
+  delete[] pc_sin_be;
+  delete[] pc_cos_be;
+  delete[] pc_sin_be3;
+  delete[] pc_fac;
 }
 
 void TwoPunctures::Solve()
@@ -1365,12 +1445,12 @@ void TwoPunctures::F_of_v(int nvar, int n1, int n2, int n3, derivs v, double *F,
       {
 
         al = Pih * (2 * i + 1) / n1;
-        A = -cos(al);
+        A = -pc_cos_al[i];
         be = Pih * (2 * j + 1) / n2;
-        B = -cos(be);
+        B = -pc_cos_be[j];
         phi = 2. * Pi * k / n3;
 
-        Am1 = A - 1;
+        Am1 = pc_Am1[i];
         for (ivar = 0; ivar < nvar; ivar++)
         {
           indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
@@ -1399,7 +1479,7 @@ void TwoPunctures::F_of_v(int nvar, int n1, int n2, int n3, derivs v, double *F,
         for (ivar = 0; ivar < nvar; ivar++)
         {
           indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          F[indx] = values[ivar] * FAC;
+          F[indx] = values[ivar] * pc_fac[(size_t)i * n2 + j];
           /* if ((i<5) && ((j<5) || (j>n2-5)))*/
           /*     F[indx] = 0.0;*/
           u.d0[indx] = U.d0[ivar];   /*  U*/
@@ -1851,28 +1931,27 @@ void TwoPunctures::J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, doubl
   /*      (u.d1[], u.d2[], u.d3[], u.d11[], u.d12[], u.d13[], u.d22[], u.d23[], u.d33[])*/
   /*      at interior points and at the boundaries "+/-"*/
   int i, j, k, ivar, indx;
-  double al, be, A, B, X, R, x, r, phi, y, z, Am1, *values;
-  derivs dU, U;
+  double al, be, A, B, X, R, x, r, phi, y, z, Am1;
+  derivs &dU = ws_dU;
+  derivs &U  = ws_U;
+  double *values = ws_values;
 
   Derivatives_AB3(nvar, n1, n2, n3, dv);
 
   for (i = 0; i < n1; i++)
   {
-    values = dvector(0, nvar - 1);
-    allocate_derivs(&dU, nvar);
-    allocate_derivs(&U, nvar);
     for (j = 0; j < n2; j++)
     {
       for (k = 0; k < n3; k++)
       {
 
         al = Pih * (2 * i + 1) / n1;
-        A = -cos(al);
+        A = -pc_cos_al[i];
         be = Pih * (2 * j + 1) / n2;
-        B = -cos(be);
+        B = -pc_cos_be[j];
         phi = 2. * Pi * k / n3;
 
-        Am1 = A - 1;
+        Am1 = pc_Am1[i];
         for (ivar = 0; ivar < nvar; ivar++)
         {
           indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
@@ -1904,55 +1983,65 @@ void TwoPunctures::J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, doubl
         /* (dU, dU_x, dU_r, dU_3, dU_xx, dU_xr, dU_x3, dU_rr, dU_r3, dU_33)*/
         C_To_c(nvar, X, R, &x, &r, dU);
         /* Calculation of (y,z) and*/
-        /* (dU, dU_x, dU_y, dU_z, dU_xx, dU_xy, dU_xz, dU_yy, dU_yz, dU_zz)*/
+        /* (dU, dU_x, dU_y, dU_z, dU_xx, dU_xy, dU_xz, U_yy, dU_yz, dU_zz)*/
         rx3_To_xyz(nvar, x, r, phi, &y, &z, dU);
         LinEquations(A, B, X, R, x, r, phi, y, z, dU, U, values);
         for (ivar = 0; ivar < nvar; ivar++)
         {
           indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          Jdv[indx] = values[ivar] * FAC;
+          Jdv[indx] = values[ivar] * pc_fac[(size_t)i * n2 + j];
         }
       }
     }
-    free_dvector(values, 0, nvar - 1);
-    free_derivs(&dU, nvar);
-    free_derivs(&U, nvar);
   }
 }
 /* --------------------------------------------------------------------------*/
 void TwoPunctures::relax(double *dv, int const nvar, int const n1, int const n2, int const n3,
                          double const *rhs, int const *ncols, int **cols, double **JFD)
 {
-  int i, j, k, n;
-
-  for (k = 0; k < n3; k = k + 2)
+  // Red-black Gauss-Seidel: within each colour group, different (i,k) or
+  // (j,k) lines are independent (stencil only reaches i±1 / j±1 / k±1).
+  // One omp parallel region covers all four colour sweeps; omp for
+  // distributes the independent lines across threads.
+#pragma omp parallel
   {
-    for (n = 0; n < N_PlaneRelax; n++)
+    for (int k = 0; k < n3; k = k + 2)
     {
-      for (i = 2; i < n1; i = i + 2)
-        LineRelax_be(dv, i, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
-      for (i = 1; i < n1; i = i + 2)
-        LineRelax_be(dv, i, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
-      for (j = 1; j < n2; j = j + 2)
-        LineRelax_al(dv, j, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
-      for (j = 0; j < n2; j = j + 2)
-        LineRelax_al(dv, j, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+      for (int n = 0; n < N_PlaneRelax; n++)
+      {
+#pragma omp for schedule(static)
+        for (int i = 2; i < n1; i = i + 2)
+          LineRelax_be(dv, i, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+#pragma omp for schedule(static)
+        for (int i = 1; i < n1; i = i + 2)
+          LineRelax_be(dv, i, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+#pragma omp for schedule(static)
+        for (int j = 1; j < n2; j = j + 2)
+          LineRelax_al(dv, j, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+#pragma omp for schedule(static)
+        for (int j = 0; j < n2; j = j + 2)
+          LineRelax_al(dv, j, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+      }
     }
-  }
-  for (k = 1; k < n3; k = k + 2)
-  {
-    for (n = 0; n < N_PlaneRelax; n++)
+    for (int k = 1; k < n3; k = k + 2)
     {
-      for (i = 0; i < n1; i = i + 2)
-        LineRelax_be(dv, i, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
-      for (i = 1; i < n1; i = i + 2)
-        LineRelax_be(dv, i, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
-      for (j = 1; j < n2; j = j + 2)
-        LineRelax_al(dv, j, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
-      for (j = 0; j < n2; j = j + 2)
-        LineRelax_al(dv, j, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+      for (int n = 0; n < N_PlaneRelax; n++)
+      {
+#pragma omp for schedule(static)
+        for (int i = 0; i < n1; i = i + 2)
+          LineRelax_be(dv, i, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+#pragma omp for schedule(static)
+        for (int i = 1; i < n1; i = i + 2)
+          LineRelax_be(dv, i, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+#pragma omp for schedule(static)
+        for (int j = 1; j < n2; j = j + 2)
+          LineRelax_al(dv, j, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+#pragma omp for schedule(static)
+        for (int j = 0; j < n2; j = j + 2)
+          LineRelax_al(dv, j, k, nvar, n1, n2, n3, rhs, ncols, cols, JFD);
+      }
     }
-  }
+  } // end omp parallel
 }
 /* --------------------------------------------------------------------------*/
 void TwoPunctures::LineRelax_be(double *dv,
@@ -1963,17 +2052,17 @@ void TwoPunctures::LineRelax_be(double *dv,
 {
   int j, m, Ic, Ip, Im, col, ivar;
 
-  double *diag = new double[n2];
-  double *e = new double[n2 - 1]; /* above diagonal */
-  double *f = new double[n2 - 1]; /* below diagonal */
-  double *b = new double[n2];     /* rhs */
-  double *x = new double[n2];     /* solution vector */
-
-  //  gsl_vector *diag = gsl_vector_alloc(n2);
-  //  gsl_vector *e = gsl_vector_alloc(n2-1); /* above diagonal */
-  //  gsl_vector *f = gsl_vector_alloc(n2-1); /* below diagonal */
-  //  gsl_vector *b = gsl_vector_alloc(n2);   /* rhs */
-  //  gsl_vector *x = gsl_vector_alloc(n2);   /* solution vector */
+  // Use pre-allocated workspace (sized ws_nmax >= n2, per-thread)
+#ifdef _OPENMP
+  int tid = omp_get_thread_num();
+#else
+  int tid = 0;
+#endif
+  double *diag = ws_diag + tid * ws_nmax;
+  double *e    = ws_e    + tid * ws_nmax;  /* above diagonal */
+  double *f    = ws_f    + tid * ws_nmax;  /* below diagonal */
+  double *b    = ws_b    + tid * ws_nmax;  /* rhs */
+  double *x    = ws_x    + tid * ws_nmax;  /* solution vector */
 
   for (ivar = 0; ivar < nvar; ivar++)
   {
@@ -1983,33 +2072,25 @@ void TwoPunctures::LineRelax_be(double *dv,
     }
     diag[n2 - 1] = 0;
 
-    //    gsl_vector_set_zero(diag);
-    //    gsl_vector_set_zero(e);
-    //    gsl_vector_set_zero(f);
     for (j = 0; j < n2; j++)
     {
       Ip = Index(ivar, i, j + 1, k, nvar, n1, n2, n3);
       Ic = Index(ivar, i, j, k, nvar, n1, n2, n3);
       Im = Index(ivar, i, j - 1, k, nvar, n1, n2, n3);
       b[j] = rhs[Ic];
-      //      gsl_vector_set(b,j,rhs[Ic]);
       for (m = 0; m < ncols[Ic]; m++)
       {
         col = cols[Ic][m];
         if (col != Ip && col != Ic && col != Im)
           b[j] -= JFD[Ic][m] * dv[col];
-        //          *gsl_vector_ptr(b, j) -= JFD[Ic][m] * dv[col];
         else
         {
           if (col == Im && j > 0)
             f[j - 1] = JFD[Ic][m];
-          //            gsl_vector_set(f,j-1,JFD[Ic][m]);
           if (col == Ic)
             diag[j] = JFD[Ic][m];
-          //            gsl_vector_set(diag,j,JFD[Ic][m]);
           if (col == Ip && j < n2 - 1)
             e[j] = JFD[Ic][m];
-          //            gsl_vector_set(e,j,JFD[Ic][m]);
         }
       }
     }
@@ -2020,25 +2101,12 @@ void TwoPunctures::LineRelax_be(double *dv,
     //              (  0   0  f_2 d_3 )
     //
     ThomasAlgorithm(n2, f, diag, e, x, b);
-    //    gsl_linalg_solve_tridiag(diag, e, f, b, x);
     for (j = 0; j < n2; j++)
     {
       Ic = Index(ivar, i, j, k, nvar, n1, n2, n3);
       dv[Ic] = x[j];
-      //      dv[Ic] = gsl_vector_get(x, j);
     }
   }
-
-  delete[] diag;
-  delete[] e;
-  delete[] f;
-  delete[] b;
-  delete[] x;
-  //  gsl_vector_free(diag);
-  //  gsl_vector_free(e);
-  //  gsl_vector_free(f);
-  //  gsl_vector_free(b);
-  //  gsl_vector_free(x);
 }
 /* --------------------------------------------------------------------------*/
 void TwoPunctures::JFD_times_dv(int i, int j, int k, int nvar, int n1, int n2,
@@ -2053,10 +2121,8 @@ void TwoPunctures::JFD_times_dv(int i, int j, int k, int nvar, int n1, int n2,
   double sin_be, sin_be_i1, sin_be_i2, sin_be_i3, cos_be;
   double dV0, dV1, dV2, dV3, dV11, dV12, dV13, dV22, dV23, dV33,
       ha, ga, ga2, hb, gb, gb2, hp, gp, gp2, gagb, gagp, gbgp;
-  derivs dU, U;
-
-  allocate_derivs(&dU, nvar);
-  allocate_derivs(&U, nvar);
+  derivs &dU = ws_dU;
+  derivs &U  = ws_U;
 
   if (k < 0)
     k = k + n3;
@@ -2064,14 +2130,12 @@ void TwoPunctures::JFD_times_dv(int i, int j, int k, int nvar, int n1, int n2,
     k = k - n3;
 
   ha = Pi / n1; /* ha: Stepsize with respect to (al)*/
-  al = ha * (i + 0.5);
-  A = -cos(al);
+  A = -pc_cos_al[i];
   ga = 1 / ha;
   ga2 = ga * ga;
 
   hb = Pi / n2; /* hb: Stepsize with respect to (be)*/
-  be = hb * (j + 0.5);
-  B = -cos(be);
+  B = -pc_cos_be[j];
   gb = 1 / hb;
   gb2 = gb * gb;
   gagb = ga * gb;
@@ -2083,18 +2147,18 @@ void TwoPunctures::JFD_times_dv(int i, int j, int k, int nvar, int n1, int n2,
   gagp = ga * gp;
   gbgp = gb * gp;
 
-  sin_al = sin(al);
-  sin_be = sin(be);
+  sin_al = pc_sin_al[i];
+  sin_be = pc_sin_be[j];
   sin_al_i1 = 1 / sin_al;
   sin_be_i1 = 1 / sin_be;
   sin_al_i2 = sin_al_i1 * sin_al_i1;
   sin_be_i2 = sin_be_i1 * sin_be_i1;
   sin_al_i3 = sin_al_i1 * sin_al_i2;
   sin_be_i3 = sin_be_i1 * sin_be_i2;
-  cos_al = -A;
-  cos_be = -B;
+  cos_al = pc_cos_al[i];
+  cos_be = pc_cos_be[j];
 
-  Am1 = A - 1;
+  Am1 = pc_Am1[i];
   for (ivar = 0; ivar < nvar; ivar++)
   {
     int iccc = Index(ivar, i, j, k, nvar, n1, n2, n3),
@@ -2173,10 +2237,7 @@ void TwoPunctures::JFD_times_dv(int i, int j, int k, int nvar, int n1, int n2,
   rx3_To_xyz(nvar, x, r, phi, &y, &z, dU);
   LinEquations(A, B, X, R, x, r, phi, y, z, dU, U, values);
   for (ivar = 0; ivar < nvar; ivar++)
-    values[ivar] *= FAC;
-
-  free_derivs(&dU, nvar);
-  free_derivs(&U, nvar);
+    values[ivar] *= pc_fac[(size_t)i * n2 + j];
 }
 #undef FAC
 /*-----------------------------------------------------------*/
@@ -2208,17 +2269,17 @@ void TwoPunctures::LineRelax_al(double *dv,
 {
   int i, m, Ic, Ip, Im, col, ivar;
 
-  double *diag = new double[n1];
-  double *e = new double[n1 - 1]; /* above diagonal */
-  double *f = new double[n1 - 1]; /* below diagonal */
-  double *b = new double[n1];     /* rhs */
-  double *x = new double[n1];     /* solution vector */
-
-  //  gsl_vector *diag = gsl_vector_alloc(n1);
-  //  gsl_vector *e = gsl_vector_alloc(n1-1); /* above diagonal */
-  //  gsl_vector *f = gsl_vector_alloc(n1-1); /* below diagonal */
-  //  gsl_vector *b = gsl_vector_alloc(n1);   /* rhs */
-  //  gsl_vector *x = gsl_vector_alloc(n1);   /* solution vector */
+  // Use pre-allocated workspace (sized ws_nmax >= n1, per-thread)
+#ifdef _OPENMP
+  int tid = omp_get_thread_num();
+#else
+  int tid = 0;
+#endif
+  double *diag = ws_diag + tid * ws_nmax;
+  double *e    = ws_e    + tid * ws_nmax;  /* above diagonal */
+  double *f    = ws_f    + tid * ws_nmax;  /* below diagonal */
+  double *b    = ws_b    + tid * ws_nmax;  /* rhs */
+  double *x    = ws_x    + tid * ws_nmax;  /* solution vector */
 
   for (ivar = 0; ivar < nvar; ivar++)
   {
@@ -2228,57 +2289,35 @@ void TwoPunctures::LineRelax_al(double *dv,
     }
     diag[n1 - 1] = 0;
 
-    //    gsl_vector_set_zero(diag);
-    //    gsl_vector_set_zero(e);
-    //    gsl_vector_set_zero(f);
     for (i = 0; i < n1; i++)
     {
       Ip = Index(ivar, i + 1, j, k, nvar, n1, n2, n3);
       Ic = Index(ivar, i, j, k, nvar, n1, n2, n3);
       Im = Index(ivar, i - 1, j, k, nvar, n1, n2, n3);
       b[i] = rhs[Ic];
-      //      gsl_vector_set(b,i,rhs[Ic]);
       for (m = 0; m < ncols[Ic]; m++)
       {
         col = cols[Ic][m];
         if (col != Ip && col != Ic && col != Im)
           b[i] -= JFD[Ic][m] * dv[col];
-        //          *gsl_vector_ptr(b, i) -= JFD[Ic][m] * dv[col];
         else
         {
           if (col == Im && i > 0)
             f[i - 1] = JFD[Ic][m];
-          //            gsl_vector_set(f,i-1,JFD[Ic][m]);
           if (col == Ic)
             diag[i] = JFD[Ic][m];
-          //            gsl_vector_set(diag,i,JFD[Ic][m]);
           if (col == Ip && i < n1 - 1)
             e[i] = JFD[Ic][m];
-          //            gsl_vector_set(e,i,JFD[Ic][m]);
         }
       }
     }
     ThomasAlgorithm(n1, f, diag, e, x, b);
-    //    gsl_linalg_solve_tridiag(diag, e, f, b, x);
     for (i = 0; i < n1; i++)
     {
       Ic = Index(ivar, i, j, k, nvar, n1, n2, n3);
       dv[Ic] = x[i];
-      //      dv[Ic] = gsl_vector_get(x, i);
     }
   }
-
-  delete[] diag;
-  delete[] e;
-  delete[] f;
-  delete[] b;
-  delete[] x;
-
-  //  gsl_vector_free(diag);
-  //  gsl_vector_free(e);
-  //  gsl_vector_free(f);
-  //  gsl_vector_free(b);
-  //  gsl_vector_free(x);
 }
 /* -------------------------------------------------------------------------*/
 // a[N], b[N-1], c[N-1], x[N], q[N]
@@ -2291,11 +2330,16 @@ void TwoPunctures::LineRelax_al(double *dv,
 void TwoPunctures::ThomasAlgorithm(int N, double *b, double *a, double *c, double *x, double *q)
 {
   int i;
-  double *l, *u, *d, *y;
-  l = new double[N - 1];
-  u = new double[N - 1];
-  d = new double[N];
-  y = new double[N];
+  // Use pre-allocated workspace (sized ws_nmax >= N, per-thread)
+#ifdef _OPENMP
+  int tid = omp_get_thread_num();
+#else
+  int tid = 0;
+#endif
+  double *l = ws_l + tid * ws_nmax;
+  double *u = ws_u + tid * ws_nmax;
+  double *d = ws_d + tid * ws_nmax;
+  double *y = ws_y + tid * ws_nmax;
 
   /* LU Decomposition */
   d[0] = a[0];
@@ -2321,11 +2365,6 @@ void TwoPunctures::ThomasAlgorithm(int N, double *b, double *a, double *c, doubl
 
   for (i = N - 2; i >= 0; i--)
     x[i] = (y[i] - u[i] * x[i + 1]) / d[i];
-
-  delete[] l;
-  delete[] u;
-  delete[] d;
-  delete[] y;
 
   return;
 }

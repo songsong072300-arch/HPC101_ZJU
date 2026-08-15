@@ -42,6 +42,24 @@ private:
 
        int ntotal;
 
+       // Pre-allocated workspace for LineRelax / ThomasAlgorithm.
+       // Eliminates millions of new[]/delete[] on the hot solver path.
+   // One set per OpenMP thread (flat buffer: [nthreads * ws_nmax]).
+   int ws_nmax, ws_nthreads;
+   double *ws_diag, *ws_e, *ws_f, *ws_b, *ws_x;   // LineRelax_be / _al
+   double *ws_l, *ws_u, *ws_d, *ws_y;               // ThomasAlgorithm
+
+       // Pre-allocated derivs for JFD_times_dv / J_times_dv / F_of_v.
+       derivs ws_dU, ws_U;
+       double *ws_values;
+
+       // Precomputed trig tables: al depends only on i, be only on j.
+       // Eliminates ~25% of runtime spent in __cos / __sin on the hot path.
+       double *pc_sin_al, *pc_cos_al, *pc_Am1;   // size n1
+       double *pc_sin_be, *pc_cos_be;            // size n2
+       double *pc_sin_al3, *pc_sin_be3;          // sin(al)^3, sin(be)^3
+       double *pc_fac;                             // size n1*n2: sin_al^3 * sin_be^3
+
        struct parameters
        {
               int nvar, n1, n2, n3;

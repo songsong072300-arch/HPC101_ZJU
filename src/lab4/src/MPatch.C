@@ -7,6 +7,9 @@
 #include <string>
 #include <cmath>
 #include <new>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 using namespace std;
 
 #include "misc.h"
@@ -275,6 +278,27 @@ void Patch::Interp_Points(MyList<var> *VarList,
                           int NN, double **XX,
                           double *Shellf, int Symmetry)
 {
+    Interp_Points_Impl(VarList, NN, XX, Shellf, Symmetry, false, nullptr);
+}
+
+void Patch::Interp_Points_ReduceScatter(MyList<var> *VarList,
+                          int NN, double **XX,
+                          double *Shellf, int Symmetry)
+{
+    Interp_Points_Impl(VarList, NN, XX, Shellf, Symmetry, true, nullptr);
+}
+
+void Patch::Interp_Points_Local(MyList<var> *VarList,
+                          int NN, double **XX,
+                          double *Shellf, int *LocalWeight, int Symmetry)
+{
+    Interp_Points_Impl(VarList, NN, XX, Shellf, Symmetry, false, LocalWeight);
+}
+
+void Patch::Interp_Points_Impl(MyList<var> *VarList,
+                          int NN, double **XX,
+                          double *Shellf, int Symmetry, bool reduce_scatter, int *local_weight)
+{
     // NOTE: we do not Synchnize variables here, make sure of that before calling this routine
     int myrank;
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
@@ -290,7 +314,13 @@ void Patch::Interp_Points(MyList<var> *VarList,
     }
 
     double *shellf;
+#ifdef USE_GPU
     shellf = new double[NN * num_var];
+#else
+    // Reduce_scatter needs a full local contribution as its send buffer.
+    // The normal Allreduce path can continue reducing the caller buffer in place.
+    shellf = reduce_scatter ? new double[NN * num_var] : Shellf;
+#endif
     memset(shellf, 0, sizeof(double) * NN * num_var);
 
     int *weight;
@@ -408,9 +438,65 @@ void Patch::Interp_Points(MyList<var> *VarList,
     cudaFree(d_shellf);
     cudaFree(d_weight);
 #else
+    int interp_threads = 1;
+#ifdef _OPENMP
+    interp_threads = omp_get_max_threads();
+#endif
+    const char *surface_threads_env = std::getenv("AMSS_SURFACE_OMP_THREADS");
+    if (local_weight != nullptr && surface_threads_env != nullptr)
+    {
+        const int requested_threads = std::atoi(surface_threads_env);
+        if (requested_threads < 1)
+        {
+            if (myrank == 0)
+                cerr << "AMSS_SURFACE_OMP_THREADS must be a positive integer" << endl;
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+
+        bool has_local_point = false;
+        for (int point = 0; point < NN && !has_local_point; point++)
+        {
+            MyList<Block> *scan = blb;
+            while (scan)
+            {
+                Block *block = scan->data;
+                bool inside = true;
+                for (int axis = 0; axis < dim; axis++)
+                {
+                    const double lower =
+                        feq(block->bbox[axis], bbox[axis], DH[axis] / 2)
+                        ? block->bbox[axis] + lli[axis] * DH[axis]
+                        : block->bbox[axis] + ghost_width * DH[axis];
+                    const double upper =
+                        feq(block->bbox[dim + axis], bbox[dim + axis], DH[axis] / 2)
+                        ? block->bbox[dim + axis] - uui[axis] * DH[axis]
+                        : block->bbox[dim + axis] - ghost_width * DH[axis];
+                    if (XX[axis][point] - lower < -DH[axis] / 2 ||
+                        XX[axis][point] - upper > DH[axis] / 2)
+                    {
+                        inside = false;
+                        break;
+                    }
+                }
+                if (inside)
+                {
+                    has_local_point = myrank == block->rank;
+                    break;
+                }
+                if (scan == ble)
+                    break;
+                scan = scan->next;
+            }
+        }
+        interp_threads = has_local_point ? requested_threads : 1;
+    }
+
+#pragma omp parallel for schedule(static) num_threads(interp_threads)
     for (int j = 0; j < NN; j++)
     {
         double pox[dim];
+        double local_llb[dim];
+        double local_uub[dim];
         for (int i = 0; i < dim; i++)
             pox[i] = XX[i][j];
 
@@ -423,10 +509,10 @@ void Patch::Interp_Points(MyList<var> *VarList,
             bool flag = true;
             for (int i = 0; i < dim; i++)
             {
-                llb[i] = (feq(BP->bbox[i], bbox[i], DH[i] / 2)) ? BP->bbox[i] + lli[i] * DH[i] : BP->bbox[i] + ghost_width * DH[i];
-                uub[i] = (feq(BP->bbox[dim + i], bbox[dim + i], DH[i] / 2)) ? BP->bbox[dim + i] - uui[i] * DH[i] : BP->bbox[dim + i] - ghost_width * DH[i];
+                local_llb[i] = (feq(BP->bbox[i], bbox[i], DH[i] / 2)) ? BP->bbox[i] + lli[i] * DH[i] : BP->bbox[i] + ghost_width * DH[i];
+                local_uub[i] = (feq(BP->bbox[dim + i], bbox[dim + i], DH[i] / 2)) ? BP->bbox[dim + i] - uui[i] * DH[i] : BP->bbox[dim + i] - ghost_width * DH[i];
 
-                if (XX[i][j] - llb[i] < -DH[i] / 2 || XX[i][j] - uub[i] > DH[i] / 2)
+                if (XX[i][j] - local_llb[i] < -DH[i] / 2 || XX[i][j] - local_uub[i] > DH[i] / 2)
                 {
                     flag = false;
                     break;
@@ -438,13 +524,13 @@ void Patch::Interp_Points(MyList<var> *VarList,
                 notfind = false;
                 if (myrank == BP->rank)
                 {
-                    varl = VarList;
+                    MyList<var> *local_varl = VarList;
                     int k = 0;
-                    while (varl)
+                    while (local_varl)
                     {
-                        f_global_interp(BP->shape, BP->X[0], BP->X[1], BP->X[2], BP->fgfs[varl->data->sgfn], shellf[j * num_var + k],
-                                        pox[0], pox[1], pox[2], ordn, varl->data->SoA, Symmetry);
-                        varl = varl->next;
+                        f_global_interp(BP->shape, BP->X[0], BP->X[1], BP->X[2], BP->fgfs[local_varl->data->sgfn], shellf[j * num_var + k],
+                                        pox[0], pox[1], pox[2], ordn, local_varl->data->SoA, Symmetry);
+                        local_varl = local_varl->next;
                         k++;
                     }
                     weight[j] = 1;
@@ -459,34 +545,74 @@ void Patch::Interp_Points(MyList<var> *VarList,
 
     // ================== GPU 零拷贝重构部分 结束 ==================
 
-#ifdef USE_GPU
-    // GPU produced shellf/weight directly on host (above). Compute Weight via Allreduce.
-    int *Weight = new int[NN];
-    MPI_Allreduce(weight, Weight, NN, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    // (shellf was already reduced into Shellf inside the GPU block.)
-#else
-    // CPU path: Allreduce the local shellf/weight into Shellf/Weight.
-    MPI_Allreduce(shellf, Shellf, NN * num_var, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    int *Weight;
-    Weight = new int[NN];
-    MPI_Allreduce(weight, Weight, NN, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#ifndef USE_GPU
+    if (local_weight != nullptr)
+    {
+        memcpy(local_weight, weight, sizeof(int) * NN);
+        delete[] weight;
+        delete[] DH;
+        delete[] llb;
+        delete[] uub;
+        return;
+    }
 #endif
 
-    for (int i = 0; i < NN; i++)
+    int result_count = NN;
+    int result_offset = 0;
+    int *Weight;
+#ifdef USE_GPU
+    Weight = new int[NN];
+    MPI_Allreduce(weight, Weight, NN, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#else
+    if (reduce_scatter)
     {
+        int world_size;
+        MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+        int *point_counts = new int[world_size];
+        int *value_counts = new int[world_size];
+        const int points_per_rank = NN / world_size;
+        const int remainder = NN % world_size;
+        for (int rank = 0; rank < world_size; rank++)
+        {
+            point_counts[rank] = points_per_rank + (rank < remainder ? 1 : 0);
+            value_counts[rank] = point_counts[rank] * num_var;
+        }
+        result_count = point_counts[myrank];
+        result_offset = myrank * points_per_rank +
+                        (myrank < remainder ? myrank : remainder);
+        Weight = new int[result_count];
+        MPI_Reduce_scatter(shellf, Shellf, value_counts, MPI_DOUBLE, MPI_SUM,
+                           MPI_COMM_WORLD);
+        MPI_Reduce_scatter(weight, Weight, point_counts, MPI_INT, MPI_SUM,
+                           MPI_COMM_WORLD);
+        delete[] point_counts;
+        delete[] value_counts;
+    }
+    else
+    {
+        MPI_Allreduce(MPI_IN_PLACE, Shellf, NN * num_var, MPI_DOUBLE, MPI_SUM,
+                      MPI_COMM_WORLD);
+        Weight = new int[NN];
+        MPI_Allreduce(weight, Weight, NN, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    }
+#endif
+
+    for (int i = 0; i < result_count; i++)
+    {
+        const int global_i = result_offset + i;
         if (Weight[i] > 1)
         {
-            if (myrank == 0)
+            if (reduce_scatter || myrank == 0)
                 cout << "WARNING: Patch::Interp_Points meets multiple weight" << endl;
             for (int j = 0; j < num_var; j++)
                 Shellf[j + i * num_var] = Shellf[j + i * num_var] / Weight[i];
         }
-        else if (Weight[i] == 0 && myrank == 0)
+        else if (Weight[i] == 0 && (reduce_scatter || myrank == 0))
         {
             cout << "ERROR: Patch::Interp_Points fails to find point (";
             for (int j = 0; j < dim; j++)
             {
-                cout << XX[j][i];
+                cout << XX[j][global_i];
                 if (j < dim - 1)
                     cout << ",";
                 else
@@ -540,7 +666,12 @@ void Patch::Interp_Points(MyList<var> *VarList,
         }
     }
 
+#ifdef USE_GPU
     delete[] shellf;
+#else
+    if (reduce_scatter)
+        delete[] shellf;
+#endif
     delete[] weight;
     delete[] Weight;
     delete[] DH;
@@ -567,8 +698,8 @@ void Patch::Interp_Points(MyList<var> *VarList,
 		varl = varl->next;
 	}
 
-	double *shellf;
-	shellf = new double[NN * num_var];
+	// Reuse the caller's output buffer and reduce it in place.
+	double *shellf = Shellf;
 	memset(shellf, 0, sizeof(double) * NN * num_var);
 
 	// we use weight to monitor code, later some day we can move it for optimization
@@ -658,7 +789,7 @@ void Patch::Interp_Points(MyList<var> *VarList,
 		}
 	}
 
-	MPI_Allreduce(shellf, Shellf, NN * num_var, MPI_DOUBLE, MPI_SUM, Comm_here);
+	MPI_Allreduce(MPI_IN_PLACE, Shellf, NN * num_var, MPI_DOUBLE, MPI_SUM, Comm_here);
 	int *Weight;
 	Weight = new int[NN];
 	MPI_Allreduce(weight, Weight, NN, MPI_INT, MPI_SUM, Comm_here);
@@ -677,7 +808,6 @@ void Patch::Interp_Points(MyList<var> *VarList,
 		}
 	}
 
-	delete[] shellf;
 	delete[] weight;
 	delete[] Weight;
 	delete[] DH;
