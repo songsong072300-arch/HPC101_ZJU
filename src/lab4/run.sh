@@ -33,7 +33,7 @@ export AMSS_SURFACE_COLLECTIVE="${AMSS_SURFACE_COLLECTIVE:-owner_local}"
 export AMSS_SURFACE_OMP_THREADS="${AMSS_SURFACE_OMP_THREADS:-16}"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-false}"
 unset OMP_PLACES 2>/dev/null || true
-AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec --allow-run-as-root --use-hwthread-cpus --map-by slot --bind-to none --mca mpi_yield_when_idle 1}"
+export AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec --allow-run-as-root --use-hwthread-cpus --map-by slot --bind-to none --mca mpi_yield_when_idle 1}"
 # ============================================================
 
 ROOT_DIR="$(pwd)"
