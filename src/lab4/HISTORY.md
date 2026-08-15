@@ -412,9 +412,40 @@ block），原遍历几乎无开销；缓存的 bbox 验证反而引入了额外
 
 ## 下一步
 
-1. 未插桩重复 O9 短跑，以中位数确认收益。
-2. 探索 `compute_rhs_bssn_`（17.49%）中自动数组的 `allocatable, save` 预分配，
-   减少 `malloc/cfree`（2.88%）和 `memset`（3.72%）开销。
+1. 未插桩重复 O9+O11 短跑，以中位数确认收益。
+2. 探索差分 kernel（`fdderivs` 5.6% + `fderivs` 2.7% = 8.3%）的循环合并或向量化。
+3. 正式 `t=40` 长跑验证。
+
+### O11：bssn_rhs 自动数组改为 allocatable,save 预分配
+
+状态：**保留**。
+
+日期：2026-08-15。
+
+profiler 证据（`perf_o9` 采样）：`malloc` 1.48% + `cfree` 1.38% = 2.86%，`__memset_sve_zva64` 
+3.42%，`__memcpy_sve` 3.55%。`compute_rhs_bssn_` 声明了 40 个 `dimension(ex(1),ex(2),ex(3))`
+自动数组，每次调用隐式 malloc + memset + free。
+
+修改：
+
+- `src/bssn_rhs.f90`：将第 68-84 行的 40 个自动数组声明改为
+  `allocatable, save`，首次调用时分配，后续调用复用。增加 size 检查以处理
+  AMR 不同 level 的不同网格尺寸。
+
+短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、TwoPuncture cache：
+
+| 运行 | Before Evolve | Total Evolve | Total Running | 正确性 |
+|---|---:|---:|---:|---|
+| O9 perf 基线 | 3.74 s | 40.43 s | 44.17 s | — |
+| O11 `j98163` | 0.63 s | 39.57 s | 40.20 s | PASS, RMS=0 |
+
+相对 O9 perf 基线：Before Evolve -83.7%（首次分析阶段不再分配），Total Evolve -2.1%，
+Total Running -9.0%，端到端 -9.3%。正确性 PASS，四文件位级一致。
+
+## 下一步
+
+1. 未插桩重复 O9+O11 短跑，以中位数确认收益。
+2. 探索差分 kernel（`fdderivs` 5.6% + `fderivs` 2.7% = 8.3%）的循环合并或向量化。
 3. 正式 `t=40` 长跑验证。
 
 ## 后续记录模板

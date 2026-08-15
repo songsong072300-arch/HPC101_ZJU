@@ -64,24 +64,26 @@
   integer::gont
 
 !~~~~~~> Other variables:
+! Auto arrays converted to allocatable,save to avoid malloc/free on every call.
+! Allocated once on first call; deallocated automatically at program exit.
 
-  real*8, dimension(ex(1),ex(2),ex(3)) :: gxx,gyy,gzz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: chix,chiy,chiz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: gxxx,gxyx,gxzx,gyyx,gyzx,gzzx
-  real*8, dimension(ex(1),ex(2),ex(3)) :: gxxy,gxyy,gxzy,gyyy,gyzy,gzzy
-  real*8, dimension(ex(1),ex(2),ex(3)) :: gxxz,gxyz,gxzz,gyyz,gyzz,gzzz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: Lapx,Lapy,Lapz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: betaxx,betaxy,betaxz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: betayx,betayy,betayz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: betazx,betazy,betazz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: Gamxx,Gamxy,Gamxz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: Gamyx,Gamyy,Gamyz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: Gamzx,Gamzy,Gamzz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: Kx,Ky,Kz,div_beta,S
-  real*8, dimension(ex(1),ex(2),ex(3)) :: f,fxx,fxy,fxz,fyy,fyz,fzz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: Gamxa,Gamya,Gamza,alpn1,chin1
-  real*8, dimension(ex(1),ex(2),ex(3)) :: gupxx,gupxy,gupxz
-  real*8, dimension(ex(1),ex(2),ex(3)) :: gupyy,gupyz,gupzz
+  real*8, dimension(:,:,:), allocatable, save :: gxx,gyy,gzz
+  real*8, dimension(:,:,:), allocatable, save :: chix,chiy,chiz
+  real*8, dimension(:,:,:), allocatable, save :: gxxx,gxyx,gxzx,gyyx,gyzx,gzzx
+  real*8, dimension(:,:,:), allocatable, save :: gxxy,gxyy,gxzy,gyyy,gyzy,gzzy
+  real*8, dimension(:,:,:), allocatable, save :: gxxz,gxyz,gxzz,gyyz,gyzz,gzzz
+  real*8, dimension(:,:,:), allocatable, save :: Lapx,Lapy,Lapz
+  real*8, dimension(:,:,:), allocatable, save :: betaxx,betaxy,betaxz
+  real*8, dimension(:,:,:), allocatable, save :: betayx,betayy,betayz
+  real*8, dimension(:,:,:), allocatable, save :: betazx,betazy,betazz
+  real*8, dimension(:,:,:), allocatable, save :: Gamxx,Gamxy,Gamxz
+  real*8, dimension(:,:,:), allocatable, save :: Gamyx,Gamyy,Gamyz
+  real*8, dimension(:,:,:), allocatable, save :: Gamzx,Gamzy,Gamzz
+  real*8, dimension(:,:,:), allocatable, save :: Kx,Ky,Kz,div_beta,S
+  real*8, dimension(:,:,:), allocatable, save :: f,fxx,fxy,fxz,fyy,fyz,fzz
+  real*8, dimension(:,:,:), allocatable, save :: Gamxa,Gamya,Gamza,alpn1,chin1
+  real*8, dimension(:,:,:), allocatable, save :: gupxx,gupxy,gupxz
+  real*8, dimension(:,:,:), allocatable, save :: gupyy,gupyz,gupzz
 
   real*8,dimension(3) ::SSS,AAS,ASA,SAA,ASS,SAS,SSA
   real*8            :: dX, dY, dZ, PI
@@ -92,7 +94,47 @@
   real*8, parameter :: F1o3 = 1.D0/3.D0, F2o3 = 2.D0/3.D0,F3o2=1.5d0, F1o6 = 1.D0/6.D0
   real*8, parameter :: F16=1.6d1,F8=8.d0
 
-
+! Allocate save arrays once (or reallocate if grid size changed)
+  if (allocated(gxx)) then
+    if (size(gxx,1) /= ex(1) .or. size(gxx,2) /= ex(2) .or. size(gxx,3) /= ex(3)) then
+      deallocate(gxx,gyy,gzz,chix,chiy,chiz)
+      deallocate(gxxx,gxyx,gxzx,gyyx,gyzx,gzzx)
+      deallocate(gxxy,gxyy,gxzy,gyyy,gyzy,gzzy)
+      deallocate(gxxz,gxyz,gxzz,gyyz,gyzz,gzzz)
+      deallocate(Lapx,Lapy,Lapz)
+      deallocate(betaxx,betaxy,betaxz,betayx,betayy,betayz,betazx,betazy,betazz)
+      deallocate(Gamxx,Gamxy,Gamxz,Gamyx,Gamyy,Gamyz,Gamzx,Gamzy,Gamzz)
+      deallocate(Kx,Ky,Kz,div_beta,S)
+      deallocate(f,fxx,fxy,fxz,fyy,fyz,fzz)
+      deallocate(Gamxa,Gamya,Gamza,alpn1,chin1)
+      deallocate(gupxx,gupxy,gupxz,gupyy,gupyz,gupzz)
+    endif
+  endif
+  if (.not. allocated(gxx)) then
+    allocate(gxx(ex(1),ex(2),ex(3)),gyy(ex(1),ex(2),ex(3)),gzz(ex(1),ex(2),ex(3)))
+    allocate(chix(ex(1),ex(2),ex(3)),chiy(ex(1),ex(2),ex(3)),chiz(ex(1),ex(2),ex(3)))
+    allocate(gxxx(ex(1),ex(2),ex(3)),gxyx(ex(1),ex(2),ex(3)),gxzx(ex(1),ex(2),ex(3)))
+    allocate(gyyx(ex(1),ex(2),ex(3)),gyzx(ex(1),ex(2),ex(3)),gzzx(ex(1),ex(2),ex(3)))
+    allocate(gxxy(ex(1),ex(2),ex(3)),gxyy(ex(1),ex(2),ex(3)),gxzy(ex(1),ex(2),ex(3)))
+    allocate(gyyy(ex(1),ex(2),ex(3)),gyzy(ex(1),ex(2),ex(3)),gzzy(ex(1),ex(2),ex(3)))
+    allocate(gxxz(ex(1),ex(2),ex(3)),gxyz(ex(1),ex(2),ex(3)),gxzz(ex(1),ex(2),ex(3)))
+    allocate(gyyz(ex(1),ex(2),ex(3)),gyzz(ex(1),ex(2),ex(3)),gzzz(ex(1),ex(2),ex(3)))
+    allocate(Lapx(ex(1),ex(2),ex(3)),Lapy(ex(1),ex(2),ex(3)),Lapz(ex(1),ex(2),ex(3)))
+    allocate(betaxx(ex(1),ex(2),ex(3)),betaxy(ex(1),ex(2),ex(3)),betaxz(ex(1),ex(2),ex(3)))
+    allocate(betayx(ex(1),ex(2),ex(3)),betayy(ex(1),ex(2),ex(3)),betayz(ex(1),ex(2),ex(3)))
+    allocate(betazx(ex(1),ex(2),ex(3)),betazy(ex(1),ex(2),ex(3)),betazz(ex(1),ex(2),ex(3)))
+    allocate(Gamxx(ex(1),ex(2),ex(3)),Gamxy(ex(1),ex(2),ex(3)),Gamxz(ex(1),ex(2),ex(3)))
+    allocate(Gamyx(ex(1),ex(2),ex(3)),Gamyy(ex(1),ex(2),ex(3)),Gamyz(ex(1),ex(2),ex(3)))
+    allocate(Gamzx(ex(1),ex(2),ex(3)),Gamzy(ex(1),ex(2),ex(3)),Gamzz(ex(1),ex(2),ex(3)))
+    allocate(Kx(ex(1),ex(2),ex(3)),Ky(ex(1),ex(2),ex(3)),Kz(ex(1),ex(2),ex(3)))
+    allocate(div_beta(ex(1),ex(2),ex(3)),S(ex(1),ex(2),ex(3)))
+    allocate(f(ex(1),ex(2),ex(3)),fxx(ex(1),ex(2),ex(3)),fxy(ex(1),ex(2),ex(3)))
+    allocate(fxz(ex(1),ex(2),ex(3)),fyy(ex(1),ex(2),ex(3)),fyz(ex(1),ex(2),ex(3)),fzz(ex(1),ex(2),ex(3)))
+    allocate(Gamxa(ex(1),ex(2),ex(3)),Gamya(ex(1),ex(2),ex(3)),Gamza(ex(1),ex(2),ex(3)))
+    allocate(alpn1(ex(1),ex(2),ex(3)),chin1(ex(1),ex(2),ex(3)))
+    allocate(gupxx(ex(1),ex(2),ex(3)),gupxy(ex(1),ex(2),ex(3)),gupxz(ex(1),ex(2),ex(3)))
+    allocate(gupyy(ex(1),ex(2),ex(3)),gupyz(ex(1),ex(2),ex(3)),gupzz(ex(1),ex(2),ex(3)))
+  endif
 
 !!! sanity check
   dX = sum(chi)+sum(trK)+sum(dxx)+sum(gxy)+sum(gxz)+sum(dyy)+sum(gyz)+sum(dzz) &
