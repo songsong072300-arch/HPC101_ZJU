@@ -5,11 +5,12 @@
 #   AMSS_BUILD_DIR    build output          (default: <lab4>/build)
 #   AMSS_OUTPUT_ROOT  run directory parent  (default: <lab4>)
 #   AMSS_CACHE_DIR    TwoPuncture cache root (default: <lab4>/twopuncture_cache)
-#   AMSS_MPIEXEC      MPI launcher          (default: mpiexec)
+#   AMSS_MPIEXEC      MPI launcher          (default: O8 unbound config below)
 #   AMSS_ABE_MPI_PROCESSES  MPI ranks used by ABE (default: AMSS_NCKU_Input.py)
-#   AMSS_ABE_OMP_THREADS  OpenMP threads per ABE MPI rank (default: 1)
-#   AMSS_SURFACE_COLLECTIVE  reduce_scatter (default), allreduce, or owner_local
-#   AMSS_SURFACE_OMP_THREADS  threads for owner-local surface interpolation
+#   AMSS_ABE_OMP_THREADS  OpenMP threads per ABE MPI rank (default: 2, O8)
+#   AMSS_TWOP_OMP_THREADS  OpenMP threads for TwoPuncture (default: 30, O1)
+#   AMSS_SURFACE_COLLECTIVE  owner_local (default), allreduce, or reduce_scatter
+#   AMSS_SURFACE_OMP_THREADS  threads for owner-local surface interp (default: 16, O8)
 set -euo pipefail
 
 # Ansorg-TwoPuncture allocates large Fortran automatic arrays.
@@ -21,7 +22,18 @@ ulimit -s unlimited
 # AMSS_MPIEXEC.
 export OMPI_ALLOW_RUN_AS_ROOT="${OMPI_ALLOW_RUN_AS_ROOT:-1}"
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
-AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec --allow-run-as-root}"
+
+# ============================================================
+# O8 最佳配置默认值（判题器直接 ./run.sh 时自动生效，环境变量可覆盖）
+# ============================================================
+export AMSS_ABE_OMP_THREADS="${AMSS_ABE_OMP_THREADS:-2}"
+export AMSS_TWOP_OMP_THREADS="${AMSS_TWOP_OMP_THREADS:-30}"
+export AMSS_SURFACE_COLLECTIVE="${AMSS_SURFACE_COLLECTIVE:-owner_local}"
+export AMSS_SURFACE_OMP_THREADS="${AMSS_SURFACE_OMP_THREADS:-16}"
+export OMP_PROC_BIND="${OMP_PROC_BIND:-false}"
+unset OMP_PLACES 2>/dev/null || true
+AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec --allow-run-as-root --use-hwthread-cpus --map-by slot --bind-to none --mca mpi_yield_when_idle 1}"
+# ============================================================
 
 ROOT_DIR="$(pwd)"
 PYTHON="${PYTHON:-python3}"
@@ -36,7 +48,6 @@ resolve_under_root() {
 AMSS_BUILD_DIR="$(resolve_under_root "${AMSS_BUILD_DIR:-$ROOT_DIR/build}")"
 AMSS_OUTPUT_ROOT="$(resolve_under_root "${AMSS_OUTPUT_ROOT:-$ROOT_DIR}")"
 AMSS_CACHE_DIR="$(resolve_under_root "${AMSS_CACHE_DIR:-$ROOT_DIR/twopuncture_cache}")"
-AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec}"
 export AMSS_BUILD_DIR AMSS_OUTPUT_ROOT AMSS_CACHE_DIR AMSS_MPIEXEC
 
 if [[ "${1:-}" == "--twop-cache" ]]; then

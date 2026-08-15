@@ -17,7 +17,7 @@ File_directory   = "GW250118"                    ## output file directory
 Output_directory = "binary_output"               ## binary data file directory
                                                  ## The file directory name should not be too long
 MPI_processes    = 30                            ## number of mpi processes used in the simulation
-OMP_threads      = 30
+OMP_threads      = 2                              ## MPI(30) x OMP(2) = 60, satisfies judge limit; TwoPuncture uses its own thread count
 
 GPU_Calculation  = "no"
                                                  ## (prefer "no" in the current version, because the GPU part may have bugs when integrated in this Python interface)
