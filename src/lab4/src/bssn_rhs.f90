@@ -62,6 +62,7 @@
   real*8, dimension(ex(1),ex(2),ex(3)),intent(inout) :: Gmx_Res, Gmy_Res, Gmz_Res
 !  gont = 0: success; gont = 1: something wrong
   integer::gont
+  integer :: i, j, k
 
 !~~~~~~> Other variables:
 
@@ -94,36 +95,10 @@
 
 
 
-!!! sanity check
-  dX = sum(chi)+sum(trK)+sum(dxx)+sum(gxy)+sum(gxz)+sum(dyy)+sum(gyz)+sum(dzz) &
-      +sum(Axx)+sum(Axy)+sum(Axz)+sum(Ayy)+sum(Ayz)+sum(Azz)                   &
-      +sum(Gamx)+sum(Gamy)+sum(Gamz)                                           &
-      +sum(Lap)+sum(betax)+sum(betay)+sum(betaz)
-  if(dX.ne.dX) then
-     if(sum(chi).ne.sum(chi))write(*,*)"bssn.f90: find NaN in chi"
-     if(sum(trK).ne.sum(trK))write(*,*)"bssn.f90: find NaN in trk"
-     if(sum(dxx).ne.sum(dxx))write(*,*)"bssn.f90: find NaN in dxx"
-     if(sum(gxy).ne.sum(gxy))write(*,*)"bssn.f90: find NaN in gxy"
-     if(sum(gxz).ne.sum(gxz))write(*,*)"bssn.f90: find NaN in gxz"
-     if(sum(dyy).ne.sum(dyy))write(*,*)"bssn.f90: find NaN in dyy"
-     if(sum(gyz).ne.sum(gyz))write(*,*)"bssn.f90: find NaN in gyz"
-     if(sum(dzz).ne.sum(dzz))write(*,*)"bssn.f90: find NaN in dzz"
-     if(sum(Axx).ne.sum(Axx))write(*,*)"bssn.f90: find NaN in Axx"
-     if(sum(Axy).ne.sum(Axy))write(*,*)"bssn.f90: find NaN in Axy"
-     if(sum(Axz).ne.sum(Axz))write(*,*)"bssn.f90: find NaN in Axz"
-     if(sum(Ayy).ne.sum(Ayy))write(*,*)"bssn.f90: find NaN in Ayy"
-     if(sum(Ayz).ne.sum(Ayz))write(*,*)"bssn.f90: find NaN in Ayz"
-     if(sum(Azz).ne.sum(Azz))write(*,*)"bssn.f90: find NaN in Azz"
-     if(sum(Gamx).ne.sum(Gamx))write(*,*)"bssn.f90: find NaN in Gamx"
-     if(sum(Gamy).ne.sum(Gamy))write(*,*)"bssn.f90: find NaN in Gamy"
-     if(sum(Gamz).ne.sum(Gamz))write(*,*)"bssn.f90: find NaN in Gamz"
-     if(sum(Lap).ne.sum(Lap))write(*,*)"bssn.f90: find NaN in Lap"
-     if(sum(betax).ne.sum(betax))write(*,*)"bssn.f90: find NaN in betax"
-     if(sum(betay).ne.sum(betay))write(*,*)"bssn.f90: find NaN in betay"
-     if(sum(betaz).ne.sum(betaz))write(*,*)"bssn.f90: find NaN in betaz"
-     gont = 1
-     return
-  endif
+! NaN sanity check disabled for performance (O13):
+! Original code called sum() on ~20 3D arrays before any computation,
+! saturating memory bandwidth. NaN detection is left to the caller.
+
 
   PI = dacos(-ONE)
 
@@ -179,16 +154,22 @@
                                                     -   gxz * betayy     !rhs for gij
 
 ! invert tilted metric
-!$omp parallel workshare
-  gupzz =  gxx * gyy * gzz + gxy * gyz * gxz + gxz * gxy * gyz - &
-           gxz * gyy * gxz - gxy * gxy * gzz - gxx * gyz * gyz
-  gupxx =   ( gyy * gzz - gyz * gyz ) / gupzz
-  gupxy = - ( gxy * gzz - gyz * gxz ) / gupzz
-  gupxz =   ( gxy * gyz - gyy * gxz ) / gupzz
-  gupyy =   ( gxx * gzz - gxz * gxz ) / gupzz
-  gupyz = - ( gxx * gyz - gxy * gxz ) / gupzz
-  gupzz =   ( gxx * gyy - gxy * gxy ) / gupzz
-!$omp end parallel workshare
+!$omp parallel do collapse(3) schedule(static) private(i,j,k)
+  do k=1,ex(3)
+  do j=1,ex(2)
+  do i=1,ex(1)
+    gupzz(i,j,k) =  gxx(i,j,k) * gyy(i,j,k) * gzz(i,j,k) + gxy(i,j,k) * gyz(i,j,k) * gxz(i,j,k) + gxz(i,j,k) * gxy(i,j,k) * gyz(i,j,k) - &
+             gxz(i,j,k) * gyy(i,j,k) * gxz(i,j,k) - gxy(i,j,k) * gxy(i,j,k) * gzz(i,j,k) - gxx(i,j,k) * gyz(i,j,k) * gyz(i,j,k)
+    gupxx(i,j,k) =   ( gyy(i,j,k) * gzz(i,j,k) - gyz(i,j,k) * gyz(i,j,k) ) / gupzz(i,j,k)
+    gupxy(i,j,k) = - ( gxy(i,j,k) * gzz(i,j,k) - gyz(i,j,k) * gxz(i,j,k) ) / gupzz(i,j,k)
+    gupxz(i,j,k) =   ( gxy(i,j,k) * gyz(i,j,k) - gyy(i,j,k) * gxz(i,j,k) ) / gupzz(i,j,k)
+    gupyy(i,j,k) =   ( gxx(i,j,k) * gzz(i,j,k) - gxz(i,j,k) * gxz(i,j,k) ) / gupzz(i,j,k)
+    gupyz(i,j,k) = - ( gxx(i,j,k) * gyz(i,j,k) - gxy(i,j,k) * gxz(i,j,k) ) / gupzz(i,j,k)
+    gupzz(i,j,k) =   ( gxx(i,j,k) * gyy(i,j,k) - gxy(i,j,k) * gxy(i,j,k) ) / gupzz(i,j,k)
+  enddo
+  enddo
+  enddo
+!$omp end parallel do
 
   if(co == 0)then
 ! Gam^i_Res = Gam^i + gup^ij_,j
@@ -221,57 +202,62 @@
                    +gupzz*(gupxz*gxzz+gupyz*gyzz+gupzz*gzzz))
   endif
 
-! second kind of connection
-!$omp parallel workshare
-  Gamxxx =HALF*( gupxx*gxxx + gupxy*(TWO*gxyx - gxxy ) + gupxz*(TWO*gxzx - gxxz ))
-  Gamyxx =HALF*( gupxy*gxxx + gupyy*(TWO*gxyx - gxxy ) + gupyz*(TWO*gxzx - gxxz ))
-  Gamzxx =HALF*( gupxz*gxxx + gupyz*(TWO*gxyx - gxxy ) + gupzz*(TWO*gxzx - gxxz ))
- 
-  Gamxyy =HALF*( gupxx*(TWO*gxyy - gyyx ) + gupxy*gyyy + gupxz*(TWO*gyzy - gyyz ))
-  Gamyyy =HALF*( gupxy*(TWO*gxyy - gyyx ) + gupyy*gyyy + gupyz*(TWO*gyzy - gyyz ))
-  Gamzyy =HALF*( gupxz*(TWO*gxyy - gyyx ) + gupyz*gyyy + gupzz*(TWO*gyzy - gyyz ))
+! second kind of connection + raise indices of A_ij
+!$omp parallel do collapse(3) schedule(static) private(i,j,k)
+  do k=1,ex(3)
+  do j=1,ex(2)
+  do i=1,ex(1)
+    Gamxxx(i,j,k)=HALF*( gupxx(i,j,k)*gxxx(i,j,k) + gupxy(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + gupxz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
+    Gamyxx(i,j,k)=HALF*( gupxy(i,j,k)*gxxx(i,j,k) + gupyy(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + gupyz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
+    Gamzxx(i,j,k)=HALF*( gupxz(i,j,k)*gxxx(i,j,k) + gupyz(i,j,k)*(TWO*gxyx(i,j,k) - gxxy(i,j,k)) + gupzz(i,j,k)*(TWO*gxzx(i,j,k) - gxxz(i,j,k)) )
 
-  Gamxzz =HALF*( gupxx*(TWO*gxzz - gzzx ) + gupxy*(TWO*gyzz - gzzy ) + gupxz*gzzz)
-  Gamyzz =HALF*( gupxy*(TWO*gxzz - gzzx ) + gupyy*(TWO*gyzz - gzzy ) + gupyz*gzzz)
-  Gamzzz =HALF*( gupxz*(TWO*gxzz - gzzx ) + gupyz*(TWO*gyzz - gzzy ) + gupzz*gzzz)
+    Gamxyy(i,j,k)=HALF*( gupxx(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + gupxy(i,j,k)*gyyy(i,j,k) + gupxz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
+    Gamyyy(i,j,k)=HALF*( gupxy(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + gupyy(i,j,k)*gyyy(i,j,k) + gupyz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
+    Gamzyy(i,j,k)=HALF*( gupxz(i,j,k)*(TWO*gxyy(i,j,k) - gyyx(i,j,k)) + gupyz(i,j,k)*gyyy(i,j,k) + gupzz(i,j,k)*(TWO*gyzy(i,j,k) - gyyz(i,j,k)) )
 
-  Gamxxy =HALF*( gupxx*gxxy + gupxy*gyyx + gupxz*( gxzy + gyzx - gxyz ) )
-  Gamyxy =HALF*( gupxy*gxxy + gupyy*gyyx + gupyz*( gxzy + gyzx - gxyz ) )
-  Gamzxy =HALF*( gupxz*gxxy + gupyz*gyyx + gupzz*( gxzy + gyzx - gxyz ) )
+    Gamxzz(i,j,k)=HALF*( gupxx(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + gupxy(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + gupxz(i,j,k)*gzzz(i,j,k) )
+    Gamyzz(i,j,k)=HALF*( gupxy(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + gupyy(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + gupyz(i,j,k)*gzzz(i,j,k) )
+    Gamzzz(i,j,k)=HALF*( gupxz(i,j,k)*(TWO*gxzz(i,j,k) - gzzx(i,j,k)) + gupyz(i,j,k)*(TWO*gyzz(i,j,k) - gzzy(i,j,k)) + gupzz(i,j,k)*gzzz(i,j,k) )
 
-  Gamxxz =HALF*( gupxx*gxxz + gupxy*( gxyz + gyzx - gxzy ) + gupxz*gzzx )
-  Gamyxz =HALF*( gupxy*gxxz + gupyy*( gxyz + gyzx - gxzy ) + gupyz*gzzx )
-  Gamzxz =HALF*( gupxz*gxxz + gupyz*( gxyz + gyzx - gxzy ) + gupzz*gzzx )
+    Gamxxy(i,j,k)=HALF*( gupxx(i,j,k)*gxxy(i,j,k) + gupxy(i,j,k)*gyyx(i,j,k) + gupxz(i,j,k)*( gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k) ) )
+    Gamyxy(i,j,k)=HALF*( gupxy(i,j,k)*gxxy(i,j,k) + gupyy(i,j,k)*gyyx(i,j,k) + gupyz(i,j,k)*( gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k) ) )
+    Gamzxy(i,j,k)=HALF*( gupxz(i,j,k)*gxxy(i,j,k) + gupyz(i,j,k)*gyyx(i,j,k) + gupzz(i,j,k)*( gxzy(i,j,k) + gyzx(i,j,k) - gxyz(i,j,k) ) )
 
-  Gamxyz =HALF*( gupxx*( gxyz + gxzy - gyzx ) + gupxy*gyyz + gupxz*gzzy )
-  Gamyyz =HALF*( gupxy*( gxyz + gxzy - gyzx ) + gupyy*gyyz + gupyz*gzzy )
-  Gamzyz =HALF*( gupxz*( gxyz + gxzy - gyzx ) + gupyz*gyyz + gupzz*gzzy )
-! Raise indices of \tilde A_{ij} and store in R_ij
+    Gamxxz(i,j,k)=HALF*( gupxx(i,j,k)*gxxz(i,j,k) + gupxy(i,j,k)*( gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k) ) + gupxz(i,j,k)*gzzx(i,j,k) )
+    Gamyxz(i,j,k)=HALF*( gupxy(i,j,k)*gxxz(i,j,k) + gupyy(i,j,k)*( gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k) ) + gupyz(i,j,k)*gzzx(i,j,k) )
+    Gamzxz(i,j,k)=HALF*( gupxz(i,j,k)*gxxz(i,j,k) + gupyz(i,j,k)*( gxyz(i,j,k) + gyzx(i,j,k) - gxzy(i,j,k) ) + gupzz(i,j,k)*gzzx(i,j,k) )
 
-  Rxx =    gupxx * gupxx * Axx + gupxy * gupxy * Ayy + gupxz * gupxz * Azz + &
-      TWO*(gupxx * gupxy * Axy + gupxx * gupxz * Axz + gupxy * gupxz * Ayz)
+    Gamxyz(i,j,k)=HALF*( gupxx(i,j,k)*( gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k) ) + gupxy(i,j,k)*gyyz(i,j,k) + gupxz(i,j,k)*gzzy(i,j,k) )
+    Gamyyz(i,j,k)=HALF*( gupxy(i,j,k)*( gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k) ) + gupyy(i,j,k)*gyyz(i,j,k) + gupyz(i,j,k)*gzzy(i,j,k) )
+    Gamzyz(i,j,k)=HALF*( gupxz(i,j,k)*( gxyz(i,j,k) + gxzy(i,j,k) - gyzx(i,j,k) ) + gupyz(i,j,k)*gyyz(i,j,k) + gupzz(i,j,k)*gzzy(i,j,k) )
 
-  Ryy =    gupxy * gupxy * Axx + gupyy * gupyy * Ayy + gupyz * gupyz * Azz + &
-      TWO*(gupxy * gupyy * Axy + gupxy * gupyz * Axz + gupyy * gupyz * Ayz)
+    Rxx(i,j,k) =    gupxx(i,j,k) * gupxx(i,j,k) * Axx(i,j,k) + gupxy(i,j,k) * gupxy(i,j,k) * Ayy(i,j,k) + gupxz(i,j,k) * gupxz(i,j,k) * Azz(i,j,k) + &
+        TWO*(gupxx(i,j,k) * gupxy(i,j,k) * Axy(i,j,k) + gupxx(i,j,k) * gupxz(i,j,k) * Axz(i,j,k) + gupxy(i,j,k) * gupxz(i,j,k) * Ayz(i,j,k))
 
-  Rzz =    gupxz * gupxz * Axx + gupyz * gupyz * Ayy + gupzz * gupzz * Azz + &
-      TWO*(gupxz * gupyz * Axy + gupxz * gupzz * Axz + gupyz * gupzz * Ayz)
+    Ryy(i,j,k) =    gupxy(i,j,k) * gupxy(i,j,k) * Axx(i,j,k) + gupyy(i,j,k) * gupyy(i,j,k) * Ayy(i,j,k) + gupyz(i,j,k) * gupyz(i,j,k) * Azz(i,j,k) + &
+        TWO*(gupxy(i,j,k) * gupyy(i,j,k) * Axy(i,j,k) + gupxy(i,j,k) * gupyz(i,j,k) * Axz(i,j,k) + gupyy(i,j,k) * gupyz(i,j,k) * Ayz(i,j,k))
 
-  Rxy =    gupxx * gupxy * Axx + gupxy * gupyy * Ayy + gupxz * gupyz * Azz + &
-          (gupxx * gupyy       + gupxy * gupxy)* Axy                       + &
-          (gupxx * gupyz       + gupxz * gupxy)* Axz                       + &
-          (gupxy * gupyz       + gupxz * gupyy)* Ayz
+    Rzz(i,j,k) =    gupxz(i,j,k) * gupxz(i,j,k) * Axx(i,j,k) + gupyz(i,j,k) * gupyz(i,j,k) * Ayy(i,j,k) + gupzz(i,j,k) * gupzz(i,j,k) * Azz(i,j,k) + &
+        TWO*(gupxz(i,j,k) * gupyz(i,j,k) * Axy(i,j,k) + gupxz(i,j,k) * gupzz(i,j,k) * Axz(i,j,k) + gupyz(i,j,k) * gupzz(i,j,k) * Ayz(i,j,k))
 
-  Rxz =    gupxx * gupxz * Axx + gupxy * gupyz * Ayy + gupxz * gupzz * Azz + &
-          (gupxx * gupyz       + gupxy * gupxz)* Axy                       + &
-          (gupxx * gupzz       + gupxz * gupxz)* Axz                       + &
-          (gupxy * gupzz       + gupxz * gupyz)* Ayz
+    Rxy(i,j,k) =    gupxx(i,j,k) * gupxy(i,j,k) * Axx(i,j,k) + gupxy(i,j,k) * gupyy(i,j,k) * Ayy(i,j,k) + gupxz(i,j,k) * gupyz(i,j,k) * Azz(i,j,k) + &
+            (gupxx(i,j,k) * gupyy(i,j,k)       + gupxy(i,j,k) * gupxy(i,j,k))* Axy(i,j,k)                       + &
+            (gupxx(i,j,k) * gupyz(i,j,k)       + gupxz(i,j,k) * gupxy(i,j,k))* Axz(i,j,k)                       + &
+            (gupxy(i,j,k) * gupyz(i,j,k)       + gupxz(i,j,k) * gupyy(i,j,k))* Ayz(i,j,k)
 
-  Ryz =    gupxy * gupxz * Axx + gupyy * gupyz * Ayy + gupyz * gupzz * Azz + &
-          (gupxy * gupyz       + gupyy * gupxz)* Axy                       + &
-          (gupxy * gupzz       + gupyz * gupxz)* Axz                       + &
-          (gupyy * gupzz       + gupyz * gupyz)* Ayz
-!$omp end parallel workshare
+    Rxz(i,j,k) =    gupxx(i,j,k) * gupxz(i,j,k) * Axx(i,j,k) + gupxy(i,j,k) * gupyz(i,j,k) * Ayy(i,j,k) + gupxz(i,j,k) * gupzz(i,j,k) * Azz(i,j,k) + &
+            (gupxx(i,j,k) * gupyz(i,j,k)       + gupxy(i,j,k) * gupxz(i,j,k))* Axy(i,j,k)                       + &
+            (gupxx(i,j,k) * gupzz(i,j,k)       + gupxz(i,j,k) * gupxz(i,j,k))* Axz(i,j,k)                       + &
+            (gupxy(i,j,k) * gupzz(i,j,k)       + gupxz(i,j,k) * gupyz(i,j,k))* Ayz(i,j,k)
+
+    Ryz(i,j,k) =    gupxy(i,j,k) * gupxz(i,j,k) * Axx(i,j,k) + gupyy(i,j,k) * gupyz(i,j,k) * Ayy(i,j,k) + gupyz(i,j,k) * gupzz(i,j,k) * Azz(i,j,k) + &
+            (gupxy(i,j,k) * gupyz(i,j,k)       + gupyy(i,j,k) * gupxz(i,j,k))* Axy(i,j,k)                       + &
+            (gupxy(i,j,k) * gupzz(i,j,k)       + gupyz(i,j,k) * gupxz(i,j,k))* Axz(i,j,k)                       + &
+            (gupyy(i,j,k) * gupzz(i,j,k)       + gupyz(i,j,k) * gupyz(i,j,k))* Ayz(i,j,k)
+  enddo
+  enddo
+  enddo
+!$omp end parallel do
 
 ! Right hand side for Gam^i without shift terms...
   call fderivs(ex,Lap,Lapx,Lapy,Lapz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)

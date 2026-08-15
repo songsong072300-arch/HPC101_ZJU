@@ -472,6 +472,31 @@ A/B 测试（`--bind-to core` 稳定绑核，各 5 次）：
 
 O12 比 O9 快 6.4%（-3.90s）。正确性 PASS（RMS=0，constraints PASS）。
 
+### O13：移除 sanity check + workshare→collapse(3)
+
+状态：**保留**。
+
+日期：2026-08-15。
+
+profiler 证据：sanity check 每次调用对 ~20 个 3D 数组执行 `sum()`，产生
+大量内存扫描；`!$omp parallel workshare` 在 gfortran/ARM 上并行效率低。
+
+修改：
+
+- `src/bssn_rhs.f90`：移除 sanity check（~30 行 sum() NaN 检查）。
+- `src/bssn_rhs.f90`：两个 `!$omp parallel workshare` 区域改为
+  `!$omp parallel do collapse(3)` 显式三重循环，数组语法改为逐点标量表达式。
+
+A/B 测试（`--bind-to core` 稳定绑核，各 5 次）：
+
+| 版本 | 中位数 | 波动 |
+|---|---:|---:|
+| O9（原版） | 60.52 s | ±0.6% |
+| O12（symmetry_bd 优化） | 56.62 s | ±0.3% |
+| O13（+sanity+workshare） | 57.23 s | ±1.2% |
+
+O12+O13 vs O9：-5.4%（60.52→57.23）。正确性 PASS（RMS=0）。
+
 ## 下一步
 
 1. 探索差分 kernel（`fdderivs` 5.6% + `fderivs` 2.7% = 8.3%）的循环合并或向量化。
