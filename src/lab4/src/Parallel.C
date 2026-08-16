@@ -2519,10 +2519,16 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
 
     int node;
 
-    MPI_Request *reqs;
-    MPI_Status *stats;
-    reqs = new MPI_Request[2 * cpusize];
-    stats = new MPI_Status[2 * cpusize];
+    // O20: reuse static reqs/stats
+    static MPI_Request *reqs = nullptr;
+    static MPI_Status *stats = nullptr;
+    static int reqs_size = 0;
+    if (reqs_size < 2 * cpusize) {
+        delete[] reqs; delete[] stats;
+        reqs = new MPI_Request[2 * cpusize];
+        stats = new MPI_Status[2 * cpusize];
+        reqs_size = 2 * cpusize;
+    }
     int req_no = 0;
 
     double **send_data, **rec_data;
@@ -2588,8 +2594,7 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
             delete[] rec_data[node];
     }
 
-    delete[] reqs;
-    delete[] stats;
+    // O20: reqs/stats are static, don't delete here
     delete[] send_data;
     delete[] rec_data;
 }
@@ -2604,10 +2609,16 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
 
     int node;
 
-    MPI_Request *reqs;
-    MPI_Status *stats;
-    reqs = new MPI_Request[2 * cpusize];
-    stats = new MPI_Status[2 * cpusize];
+    // O20: reuse static reqs/stats
+    static MPI_Request *reqs = nullptr;
+    static MPI_Status *stats = nullptr;
+    static int reqs_size = 0;
+    if (reqs_size < 2 * cpusize) {
+        delete[] reqs; delete[] stats;
+        reqs = new MPI_Request[2 * cpusize];
+        stats = new MPI_Status[2 * cpusize];
+        reqs_size = 2 * cpusize;
+    }
     int req_no = 0;
 
     double **send_data, **rec_data;
@@ -2673,8 +2684,7 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
             delete[] rec_data[node];
     }
 
-    delete[] reqs;
-    delete[] stats;
+    // O20: reqs/stats are static, don't delete here
     delete[] send_data;
     delete[] rec_data;
 }

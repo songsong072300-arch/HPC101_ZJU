@@ -116,6 +116,50 @@ TwoPunctures::TwoPunctures(double mp, double mm, double b,
   for (int i = 0; i < n1; i++)
     for (int j = 0; j < n2; j++)
       pc_fac[(size_t)i * n2 + j] = pc_sin_al3[i] * pc_sin_be3[j];
+
+  // O19: Precompute cos/sin lookup tables for spectral transforms.
+  // chebft_Zeros uses cos(Pi/n * j * (k+0.5)) for j,k in [0,n).
+  // chebft_Extremes uses cos(Pi/(n-1) * j * k) for j,k in [0,n).
+  // fourft uses cos/sin(Pi/M * l * k) for l in [0,M], k in [0,N), M=N/2.
+  {
+    int n_cheb = (n1 > n2) ? n1 : n2; // max for chebft tables
+    // chebft_Zeros: n1 and n2 both use inv=0 path with same n
+    pc_n_cheb_zeros = n_cheb;
+    pc_cos_cheb_zeros = new double[(size_t)n_cheb * n_cheb];
+    for (int j = 0; j < n_cheb; j++)
+    {
+      double Pion = Pi / n_cheb;
+      for (int k = 0; k < n_cheb; k++)
+        pc_cos_cheb_zeros[(size_t)j * n_cheb + k] = cos(Pion * j * (k + 0.5));
+    }
+
+    pc_n_cheb_extremes = n_cheb;
+    {
+      int N = n_cheb - 1;
+      double PioN = Pi / N;
+      pc_cos_cheb_extremes = new double[(size_t)n_cheb * n_cheb];
+      for (int j = 0; j < n_cheb; j++)
+        for (int k = 0; k < n_cheb; k++)
+          pc_cos_cheb_extremes[(size_t)j * n_cheb + k] = cos(PioN * j * k);
+    }
+
+    // fourft: N = n3, M = n3/2
+    pc_n_fourft = n3;
+    int M = n3 / 2;
+    double Pi_fac = Pi / M;
+    pc_cos_fourft = new double[(size_t)(M + 1) * n3];
+    pc_sin_fourft = new double[(size_t)(M + 1) * n3];
+    for (int l = 0; l <= M; l++)
+    {
+      double x1 = Pi_fac * l;
+      for (int k = 0; k < n3; k++)
+      {
+        double x = x1 * k;
+        pc_cos_fourft[(size_t)l * n3 + k] = cos(x);
+        pc_sin_fourft[(size_t)l * n3 + k] = sin(x);
+      }
+    }
+  }
 }
 
 TwoPunctures::~TwoPunctures()
@@ -146,6 +190,10 @@ TwoPunctures::~TwoPunctures()
   delete[] pc_cos_be;
   delete[] pc_sin_be3;
   delete[] pc_fac;
+  delete[] pc_cos_cheb_zeros;
+  delete[] pc_cos_cheb_extremes;
+  delete[] pc_cos_fourft;
+  delete[] pc_sin_fourft;
 }
 
 void TwoPunctures::Solve()
@@ -744,7 +792,7 @@ void TwoPunctures::chebft_Zeros(double u[], int n, int inv)
     {
       sum = 0.0;
       for (k = 0; k < n; k++)
-        sum += u[k] * cos(Pion * j * (k + 0.5));
+        sum += u[k] * pc_cos_cheb_zeros[(size_t)j * pc_n_cheb_zeros + k];
       c[j] = fac * sum * isignum;
       isignum = -isignum;
     }
@@ -785,7 +833,7 @@ void TwoPunctures::chebft_Extremes(double u[], int n, int inv)
     {
       sum = 0.5 * (u[0] + u[N] * isignum);
       for (k = 1; k < N; k++)
-        sum += u[k] * cos(PioN * j * k);
+        sum += u[k] * pc_cos_cheb_extremes[(size_t)j * pc_n_cheb_extremes + k];
       c[j] = fac * sum * isignum;
       isignum = -isignum;
     }
@@ -864,13 +912,11 @@ void TwoPunctures::fourft(double *u, int N, int inv)
       a[l] = 0;
       if (l > 0 && l < M)
         b[l] = 0;
-      x1 = Pi_fac * l;
       for (k = 0; k < N; k++)
       {
-        x = x1 * k;
-        a[l] += fac * u[k] * cos(x);
+        a[l] += fac * u[k] * pc_cos_fourft[(size_t)l * pc_n_fourft + k];
         if (l > 0 && l < M)
-          b[l] += fac * u[k] * sin(x);
+          b[l] += fac * u[k] * pc_sin_fourft[(size_t)l * pc_n_fourft + k];
       }
     }
     u[0] = a[0];
@@ -894,11 +940,9 @@ void TwoPunctures::fourft(double *u, int N, int inv)
     for (k = 0; k < N; k++)
     {
       u[k] = 0.5 * (a[0] + a[M] * iy);
-      x1 = Pi_fac * k;
       for (l = 1; l < M; l++)
       {
-        x = x1 * l;
-        u[k] += a[l] * cos(x) + b[l] * sin(x);
+        u[k] += a[l] * pc_cos_fourft[(size_t)l * pc_n_fourft + k] + b[l] * pc_sin_fourft[(size_t)l * pc_n_fourft + k];
       }
       iy = -iy;
     }

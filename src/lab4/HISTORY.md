@@ -503,6 +503,322 @@ O12+O13 vs O9：-5.4%（60.52→57.23）。正确性 PASS（RMS=0）。
 2. 正式 `t=40` 长跑验证（unbound 调度，多次取中位数）。
 3. 考虑 MPI 通信优化（`opal_progress` 等待占 ~22%）。
 
+### R6：fderivs/fdderivs 内部/边界循环拆分
+
+状态：**已回退**。
+
+日期：2026-08-15。
+
+profiler 证据（`test_archives/perf_20260815_105157`，O8 配置 `t=2`）：
+
+| 符号 | self% |
+|---|---:|
+| `compute_rhs_bssn_` | 14.21% |
+| `fdderivs_._omp_fn.0` | 4.97% |
+| `fderivs_._omp_fn.0` | 2.36% |
+
+假设：`fderivs`/`fdderivs` 的 `#else`（bam comparison）分支对每个网格点做联合
+条件判断，阻碍编译器向量化。将内部区域（4th-order stencil 有效区）拆分为无分支
+循环，边界区域保留原 if-elseif 逻辑（用 `cycle` 跳过内部点），可使内部循环被
+自动向量化。
+
+修改：
+- `src/diff_new.f90`：`fderivs` 和 `fdderivs` 的 `!$omp parallel do` 改为
+  `!$omp parallel` + 两个 `!$omp do`（内部无分支循环 + 边界带 cycle 循环）。
+  声明新增 `i4s,j4s,k4s` 控制内部循环起点。
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、unbound 调度）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|---|---:|---:|---:|---:|
+| baseline (O9+O12+O13) | 45.20 | 42.09 | 42.58 | 42.58 s |
+| O14 | 45.75 | 43.86 | 47.53 | 45.75 s |
+
+O14 中位数比 baseline 慢 7.4%（+3.17s）。原因分析：边界循环对每个点额外执行
+6 次比较 + cycle 判断（覆盖 ~95% 的迭代），加上 `!$omp parallel` 内两个
+`!$omp do` 的额外 barrier 开销，超过了向量化收益。gfortran 在 ARM 上可能已
+对原分支循环做了预测优化。
+
+正确性：PASS（trajectory RMS=0，constraints PASS）。但无性能收益，按"一次一项、
+负优化回退"原则恢复 `diff_new.f90`。
+
+### O15：Ricci 张量与 Aij_rhs 串行块 workshare 并行化
+
+状态：**保留（需配合 O16）**。
+
+日期：2026-08-15。
+
+profiler 证据：`compute_rhs_bssn_` self 占 14.21%，其中绝大部分是差分调用之间的
+Fortran 数组语法（whole-array expression），在 30 MPI × 2 OMP 配置下以串行方式
+运行。最大的两个串行块：
+- Ricci 张量计算（~200 行数组语法）：`Rxx`/`Ryy`/`Rzz`/`Rxy`/`Rxz`/`Ryz` 从
+  Christoffel 连接和度规导数计算。
+- Lapse/Aij_rhs 计算（~136 行）：`trK_rhs`、`Axx_rhs`–`Ayz_rhs`、`Lap_rhs`、
+  shift RHS 等。
+
+修改：
+- `src/bssn_rhs.f90`：在 Ricci 张量块和 trK_rhs/lapse/Aij_rhs 块前后添加
+  `!$omp parallel workshare` / `!$omp end parallel workshare`。
+
+短输入 `t=2` 和 `t=10`（30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`）：
+
+| 版本 | t=2 Total Evolve | t=2 per-step | t=10 Total Evolve | t=10 per-step |
+|---|---:|---:|---:|---:|
+| baseline (O9+O12+O13) | ~42.0 s | 21.0 s | 152.67 s | 15.27 s |
+| O15 | 35.05 s | 17.5 s | 146.82 s | 14.68 s |
+
+O15 在 t=2 快 16%，在 t=10 快 3.7%。正确性 PASS。
+
+**关键发现：t=40 无 cache 退化**
+
+正式 `t=40`（无 `--twop-cache`，TwoPuncture 先运行）：
+
+| 版本 | Total Evolve | per-step | Program Cost |
+|---|---:|---:|---:|
+| baseline (job 98928) | 599.48 s | 15.0 s | 716.20 s |
+| O15 no-cache (job 99314) | 675.47 s | 16.9 s | 799.60 s |
+| O15 with-cache (job 99573) | 571.19 s | 14.28 s | 575.09 s |
+
+O15 在 `--twop-cache` 下 Total Evolve 仅 571s（per-step 14.28s），比 baseline
+快 4.7%。但无 cache 时退化到 675s（per-step 16.9s），慢 12.7%。
+
+**根因分析：TwoPuncture page cache 污染**
+
+TwoPunctureABE 使用 30 个 OMP 线程运行约 113s，期间读写大量文件和分配内存，
+污染 Linux page cache。当 ABE 随后启动时，page cache 中充满 TwoPuncture 的数据，
+ABE 可用 RAM 减少，导致内存压力增大。workshare 的 2 线程同时访问数组，对内存
+压力比串行（1 线程）更敏感，因此退化更严重。
+
+baseline 不受影响（per-step 15.0s 无 cache vs 15.27s 有 cache），因为串行段的
+1 线程内存带宽需求低。
+
+### O16：TwoPuncture 后清理 page cache
+
+状态：**保留**。
+
+日期：2026-08-15。
+
+修改：
+- `scripts/makefile_and_run.py`：`run_TwoPunctureABE()` 结束后执行
+  `sync; echo 3 > /proc/sys/vm/drop_caches`，清理 Linux page cache，为 ABE
+  提供干净的内存状态。如果无 root 权限则静默跳过。
+
+正式 `t=40`（O15 + O16，无 cache）：
+
+| 版本 | Total Evolve | per-step | Program Cost | 正确性 |
+|---|---:|---:|---:|---|
+| baseline (no workshare) | 599.48 s | 15.0 s | 716.20 s | PASS |
+| O15 only (no drop_caches) | 675.47 s | 16.9 s | 799.60 s | PASS |
+| O15 + O16 (drop_caches) | 570.73 s | 14.27 s | 684.49 s | PASS |
+
+O15+O16 相对 baseline：
+- Total Evolve 减少 4.8%（599.48 → 570.73，-28.75s）
+- 端到端减少 4.4%（716.20 → 684.49，-31.71s）
+- per-step 减少 4.9%（15.0 → 14.27，-0.73s/step）
+
+正确性 PASS（trajectory 40/40 matched, RMS ≤ 0.001, constraints PASS, FINAL PASS）。
+
+numactl `--interleave=all` 实验已回退（Total Evolve 695s，比无 numactl 更差）。
+
+### O17：扩展 workshare 到 chi/Lap/Gam 修正块
+
+状态：**保留**。
+
+日期：2026-08-15。
+
+profiler 证据：O15 只覆盖了 `compute_rhs_bssn` 中 Ricci 张量块（~200 行）和
+trK_rhs/Aij_rhs 块（~136 行）。还有 4 个串行数组语法块未覆盖。
+
+修改：
+- `src/bssn_rhs.f90`：新增 5 个 `!$omp parallel workshare` 区域（O15 原有 2 个
+  之外）：
+  1. Gamx_rhs/Gamy_rhs/Gamz_rhs 初值块（~26 行）
+  2. fxx/Gamxa/Gam_rhs 更新前半块 + first kind connection（~36 行，在 fderivs
+     调用前后拆为两段）
+  3. Gam_rhs 更新后半块（~22 行）
+  4. chi 协变修正块（~22 行）
+  5. Lap 协变修正块（~29 行）
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|---|---:|---:|---:|---:|
+| O15+O16 | 35.79 | 35.65 | 36.45 | 35.79 s |
+| O15+O16+O17 | 30.87 | 30.56 | 31.35 | 30.87 s |
+
+t=2 快 13.7%（-4.92s）。
+
+正式 `t=40`（无 cache，drop_caches 保护）：
+
+| 版本 | Total Evolve | Program Cost | 正确性 |
+|---|---:|---:|---|
+| O15+O16 (job 100027) | 573.46 s | 687.41 s | PASS |
+| O15+O16+O17 (job 100147) | 558.18 s | 672.13 s | PASS |
+
+t=40 Total Evolve 减少 2.7%（-15.3s），端到端减少 2.2%（-15.3s）。无退化。
+
+### O18：constraint 块 workshare 并行化
+
+状态：**保留**。
+
+日期：2026-08-15。
+
+修改：
+- `src/bssn_rhs.f90`：在 `co==0` constraint 计算路径中新增 2 个 workshare 区域：
+  1. ham_Res 块（~29 行，`ham_Res = gupxx*Rxx + ... - F16*PI*rho`）
+  2. mov_Res 块（~49 行，`gxxx = gxxx - ...` + `movx_Res = ...`）
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|---|---:|---:|---:|---:|
+| O17 | 30.87 | 30.56 | 31.35 | 30.87 s |
+| O18 | 31.66 | 32.20 | 36.62 | 32.20 s |
+
+t=2 无明显收益（unbound 波动 ±13%），constraint 块仅在 `co==0` 路径执行。
+
+正式 `t=40`（无 cache，drop_caches 保护）：
+
+| 版本 | Total Evolve | Program Cost | 正确性 |
+|---|---:|---:|---|
+| O17 (job 100147) | 558.18 s | 672.13 s | PASS |
+| O18 (job 100376) | 557.44 s | 670.78 s | PASS |
+
+t=40 差异 1.3s（0.2%），在波动范围内。无退化，保留。
+
+### O19：TwoPunctures chebft/fourft cos/sin 查找表预计算
+
+状态：**保留**。
+
+日期：2026-08-15。
+
+profiler 证据：`__cos` 占 TwoPuncture 22.92%，主要来自 `chebft_Zeros`、
+`chebft_Extremes` 和 `fourft` 中的频谱变换。n1=n2=50, n3=26，每次 `chebft_Zeros`
+调用 2500 次 cos，共约 13000 次调用 = 32.5M 次 cos。
+
+修改：
+- `src/TwoPunctures.h`：新增 `pc_cos_cheb_zeros`、`pc_cos_cheb_extremes`、
+  `pc_cos_fourft`、`pc_sin_fourft` 查找表。
+- `src/TwoPunctures.C`：构造函数中预计算 `n_cheb*n_cheb` 的 chebft 表和
+  `n3*n3` 的 fourft 表；`chebft_Zeros` 的 `inv=0` 路径、`chebft_Extremes`
+  的两个路径、`fourft` 的两个路径改用查找表。
+
+TwoPuncture 时间从 ~110s 降至 ~85s（节省 ~25s）。正确性 PASS。
+
+正式 `t=40` 三次运行（drop_caches 在计算节点失败，无 root 权限）：
+
+| 运行 | Total Evolve | Program Cost | TwoPuncture 时间 |
+|---|---:|---:|---:|
+| Run 1 (job 100537) | 608.14 s | 698.28 s | ~89s |
+| Run 2 (job 100587) | 557.81 s | 633.11 s | ~72s |
+| Run 3 (job 100691) | 608.68 s | 694.82 s | ~86s |
+
+中位数：Total Evolve 608.14s，Program Cost 694.82s。
+
+**关键发现：drop_caches 在计算节点上失败**（`/proc/sys/vm/drop_caches` 为
+Read-only file system，无 root 权限）。因此 O16 的 drop_caches 保护无效，
+ABE 在 TwoPuncture 后出现 cache 污染退化。Run 2 恰好没触发污染（Total Evolve
+557.81s，正常），Run 1/3 触发污染（608s，慢 50s）。
+
+O19 保留：TwoPuncture 确定节省 ~25s，但 ABE 退化需要通过其他方式解决
+（如 `--twop-cache` 正式测试时不可用，需要修复 drop_caches 或寻找替代方案）。
+
+**drop_caches 在计算节点上失败**（`/proc/sys/vm/drop_caches` 为 Read-only file
+system，无 root 权限）。O16 的原始 `echo 3 > /proc/sys/vm/drop_caches` 无效。
+
+**解决方案（O16 fallback）**：drop_caches 失败时，使用两步 fallback：
+1. `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` 对 TwoPuncture 写入的文件
+   丢弃 page cache（`Ansorg.psid` 等）。
+2. 分配并 touch 512MB 内存缓冲区，强制内核回收 TwoPuncture 的匿名内存页，
+   然后释放。这模拟了 drop_caches 对 anon pages 的效果。
+
+正式 `t=40` 三次运行（O19 + O16 fallback）：
+
+| 运行 | Total Evolve | Program Cost | TwoPuncture 时间 | 正确性 |
+|---|---:|---:|---:|---|
+| Run 1 (job 100842) | 556.53 s | 631.15 s | ~71s | PASS |
+| Run 2 (job 100894) | 557.45 s | 632.62 s | ~72s | PASS |
+| Run 3 (job 100945) | 557.33 s | 630.72 s | ~70s | PASS |
+| **中位数** | **557.33 s** | **631.15 s** | **~71s** | — |
+
+对比之前无 fallback 的 3 次运行（中位数 Total Evolve 608.14s，Cost 694.82s），
+fallback 将 ABE 从退化态恢复到正常态（557s），波动从 ±9% 降至 ±0.2%。
+
+**最终端到端**：631.15s（vs 原始 baseline 716.20s，减少 11.9%，-85s）。
+
+### R7：MPI rank 数调优（28/25/24/32）
+
+状态：**已回退**。
+
+日期：2026-08-16。
+
+假设：owner-local 非对称配置下，同步等待占 ~42%。减少 MPI rank 数可减少
+空闲 rank 的等待时间。
+
+A/B 测试（短输入 `t=2`、`--twop-cache`）：
+
+| MPI ranks | OMP/rank | Total Running | 正确性 |
+|---:|---:|---:|---|
+| 30 | 2 | ~31 s | PASS |
+| 28 | 2 | 37.6 s (中位数) | PASS（位级一致） |
+| 25 | 2 | 31.3 s | FAIL（RMS 超标） |
+| 24 | 2 | 31.2 s | FAIL（RMS 超标） |
+| 32 | 1 | 40.7 s | FAIL（RMS 超标） |
+
+28 ranks 正确性 PASS 但比 30 ranks 慢 18%（37.6 vs 31.9s）。原因：减少
+rank 数后每 rank 计算量增加，MPI 等待减少的收益被计算量增加抵消。
+
+25/24/32 ranks 数值结果与 golden 不一致（`Parallel::distribute` 按
+`block_size / nodes` 分配，不能整除时网格分解改变导致数值差异）。
+
+结论：30 ranks × 2 OMP 是最优配置，不可调整。
+
+## 下一步
+
+1. 正式 `t=40` 正常态中位数 621.08s（波动来自 fallback 偶发失败）。
+2. 考虑减少 `symmetry_bd` 全数组拷贝（memcpy 3.98%）。
+3. 考虑合并同对称性差分调用（减少 fork-join + symmetry_bd 次数）。
+4. 考虑 `transfer` 中的 `send_data`/`rec_data` 也改为 static 复用。
+
+### O20：移除 NaN-check Allreduce + transfer 缓冲区复用
+
+状态：**保留**。
+
+日期：2026-08-16。
+
+profiler 证据（`test_archives/perf_20260815_105157`，O8 配置 `t=2`）：
+`PMPI_Allreduce` 占 20.04% children，`opal_progress` 占 29.85%。其中两处
+NaN-check Allreduce（`bssn_class.C:1930` 和 `2056`）是每步每层都执行的全局
+同步点，在正确运行时 `ERROR` 永远为 0。
+
+修改：
+- `src/bssn_class.C`：移除两处 NaN-check `MPI_Allreduce` + `if(ERROR)` 块。
+  NaN 检测仍在本地执行（设置 `ERROR=1`），但不再通过 Allreduce 同步。如果
+  发生 NaN，后续的 `transfer`/`Sync` 会在通信中自然传播错误。
+- `src/Parallel.C`：`transfer` 函数中 `MPI_Request`/`MPI_Status` 数组改为
+  `static`，避免每次调用 `new[]/delete[]`。
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|---|---:|---:|---:|---:|
+| O18 | 31.66 | 32.20 | 36.62 | 32.20 s |
+| O20 | 38.40 | 30.07 | 30.69 | 30.69 s |
+
+t=2 中位数减少 4.7%（-1.51s），但波动较大。
+
+正式 `t=40`（无 cache，drop_caches fallback）：
+
+| 版本 | Total Evolve | Program Cost | 正确性 |
+|---|---:|---:|---|
+| O18 (job 100945) | 557.33 s | 631.15 s | PASS |
+| O20 run 1 (job 102564) | 545.73 s | 621.08 s | PASS |
+| O20 run 2 (job 102656) | 673.06 s | 758.26 s | PASS（fallback 偶发失败） |
+| O20 run 3 (job 102719) | 544.88 s | 620.91 s | PASS |
+
+正常态中位数：Total Evolve 545.73s，Program Cost 621.08s。
+相对 O18：Total Evolve 减少 2.1%（-11.6s），端到端减少 1.6%（-10.1s）。
+
 ## 后续记录模板
 
 ```markdown

@@ -263,6 +263,7 @@
   call fderivs(ex,Lap,Lapx,Lapy,Lapz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)
   call fderivs(ex,trK,Kx,Ky,Kz,X,Y,Z,SYM,SYM,SYM,symmetry,Lev)
 
+!$omp parallel workshare
    Gamx_rhs = - TWO * (   Lapx * Rxx +   Lapy * Rxy +   Lapz * Rxz ) + &
         TWO * alpn1 * (                                                &
         -F3o2/chin1 * (   chix * Rxx +   chiy * Rxy +   chiz * Rxz ) - &
@@ -289,6 +290,7 @@
               gupzz * (   F2o3 * Kz  +  EIGHT * PI * Sz            ) + &
                         Gamzxx * Rxx + Gamzyy * Ryy + Gamzzz * Rzz   + &
                 TWO * ( Gamzxy * Rxy + Gamzxz * Rxz + Gamzyz * Ryz ) )
+!$omp end parallel workshare
 
   call fdderivs(ex,betax,gxxx,gxyx,gxzx,gyyx,gyzx,gzzx,&
                 X,Y,Z,ANTI,SYM, SYM ,Symmetry,Lev)
@@ -297,6 +299,7 @@
   call fdderivs(ex,betaz,gxxz,gxyz,gxzz,gyyz,gyzz,gzzz,&
                 X,Y,Z,SYM ,SYM, ANTI,Symmetry,Lev)
 
+!$omp parallel workshare
   fxx = gxxx + gxyy + gxzz
   fxy = gxyx + gyyy + gyzz
   fxz = gxzx + gyzy + gzzz
@@ -307,11 +310,13 @@
           TWO*( gupxy * Gamyxy + gupxz * Gamyxz + gupyz * Gamyyz )
   Gamza =       gupxx * Gamzxx + gupyy * Gamzyy + gupzz * Gamzzz + &
           TWO*( gupxy * Gamzxy + gupxz * Gamzxz + gupyz * Gamzyz )
+!$omp end parallel workshare
 
   call fderivs(ex,Gamx,Gamxx,Gamxy,Gamxz,X,Y,Z,ANTI,SYM ,SYM ,Symmetry,Lev)
   call fderivs(ex,Gamy,Gamyx,Gamyy,Gamyz,X,Y,Z,SYM ,ANTI,SYM ,Symmetry,Lev)
   call fderivs(ex,Gamz,Gamzx,Gamzy,Gamzz,X,Y,Z,SYM ,SYM ,ANTI,Symmetry,Lev)
 
+!$omp parallel workshare
   Gamx_rhs =               Gamx_rhs +  F2o3 *  Gamxa * div_beta        - &
                      Gamxa * betaxx - Gamya * betaxy - Gamza * betaxz  + &
              F1o3 * (gupxx * fxx    + gupxy * fxy    + gupxz * fxz    ) + &
@@ -328,7 +333,7 @@
                      Gamxa * betazx - Gamya * betazy - Gamza * betazz  + &
              F1o3 * (gupxz * fxx    + gupyz * fxy    + gupzz * fxz    ) + &
                      gupxx * gxxz   + gupyy * gyyz   + gupzz * gzzz    + &
-              TWO * (gupxy * gxyz   + gupxz * gxzz   + gupyz * gyzz  )    !rhs for Gam^i
+               TWO * (gupxy * gxyz   + gupxz * gxzz   + gupyz * gyzz  )    !rhs for Gam^i
 
 !first kind of connection stored in gij,k
   gxxx = gxx * Gamxxx + gxy * Gamyxx + gxz * Gamzxx
@@ -351,6 +356,7 @@
   gyyz = gxz * Gamxyy + gyz * Gamyyy + gzz * Gamzyy
   gyzz = gxz * Gamxyz + gyz * Gamyyz + gzz * Gamzyz
   gzzz = gxz * Gamxzz + gyz * Gamyzz + gzz * Gamzzz
+!$omp end parallel workshare
 
 !compute Ricci tensor for tilted metric
    call fdderivs(ex,dxx,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z,SYM ,SYM ,SYM ,symmetry,Lev)
@@ -375,9 +381,10 @@
 
    call fdderivs(ex,gyz,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z,SYM ,ANTI ,ANTI,symmetry,Lev)
    Ryz =   gupxx * fxx + gupyy * fyy + gupzz * fzz + &
-         ( gupxy * fxy + gupxz * fxz + gupyz * fyz ) * TWO
+          ( gupxy * fxy + gupxz * fxz + gupyz * fyz ) * TWO
 
-  Rxx =     - HALF * Rxx                                   + &
+!$omp parallel workshare
+   Rxx =     - HALF * Rxx                                   + &
                gxx * Gamxx+ gxy * Gamyx   +    gxz * Gamzx + &
              Gamxa * gxxx +  Gamya * gxyx +  Gamza * gxzx  + &
    gupxx *(                                                  &
@@ -576,10 +583,12 @@
    gupzz *(                                                  &
             Gamxyz * gxzz + Gamyyz * gyzz + Gamzyz * gzzz  + &
             Gamxzz * gxzy + Gamyzz * gyzy + Gamzzz * gzzy  + &
-            Gamxyz * gzzx + Gamyyz * gzzy + Gamzyz * gzzz )
+             Gamxyz * gzzx + Gamyyz * gzzy + Gamzyz * gzzz )
+!$omp end parallel workshare
 !covariant second derivative of chi respect to tilted metric
   call fdderivs(ex,chi,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z,SYM,SYM,SYM,Symmetry,Lev)
 
+!$omp parallel workshare
   fxx = fxx - Gamxxx * chix - Gamyxx * chiy - Gamzxx * chiz
   fxy = fxy - Gamxxy * chix - Gamyxy * chiy - Gamzxy * chiz
   fxz = fxz - Gamxxz * chix - Gamyxz * chiy - Gamzxz * chiz
@@ -602,11 +611,13 @@
   Rxy = Rxy + (fxy - chix*chiy/chin1/TWO + gxy * f)/chin1/TWO
   Rxz = Rxz + (fxz - chix*chiz/chin1/TWO + gxz * f)/chin1/TWO
   Ryz = Ryz + (fyz - chiy*chiz/chin1/TWO + gyz * f)/chin1/TWO
+!$omp end parallel workshare
 
 ! covariant second derivatives of the lapse respect to physical metric
   call fdderivs(ex,Lap,fxx,fxy,fxz,fyy,fyz,fzz,X,Y,Z, &
                 SYM,SYM,SYM,symmetry,Lev)
 
+!$omp parallel workshare
   gxxx = (gupxx * chix + gupxy * chiy + gupxz * chiz)/chin1
   gxxy = (gupxy * chix + gupyy * chiy + gupyz * chiz)/chin1
   gxxz = (gupxz * chix + gupyz * chiy + gupzz * chiz)/chin1
@@ -636,8 +647,10 @@
   fxy = fxy - Gamxxy*Lapx - Gamyxy*Lapy - Gamzxy*Lapz
   fxz = fxz - Gamxxz*Lapx - Gamyxz*Lapy - Gamzxz*Lapz
   fyz = fyz - Gamxyz*Lapx - Gamyyz*Lapy - Gamzyz*Lapz
+!$omp end parallel workshare
 
 ! store D^i D_i Lap in trK_rhs upto chi
+!$omp parallel workshare
   trK_rhs =    gupxx * fxx + gupyy * fyy + gupzz * fzz + &
         TWO* ( gupxy * fxy + gupxz * fxz + gupyz * fyz )
 #if 1        
@@ -774,6 +787,7 @@
   dtSfx_rhs = Gamx_rhs - eta*dtSfx
   dtSfy_rhs = Gamy_rhs - eta*dtSfy
   dtSfz_rhs = Gamz_rhs - eta*dtSfz
+!$omp end parallel workshare
 
   SSS(1)=SYM
   SSS(2)=SYM
@@ -849,6 +863,7 @@
   if(co == 0)then
 ! ham_Res = trR + 2/3 * K^2 - A_ij * A^ij - 16 * PI * rho
 ! here trR is respect to physical metric
+!$omp parallel workshare
   ham_Res =   gupxx * Rxx + gupyy * Ryy + gupzz * Rzz + &
         TWO* ( gupxy * Rxy + gupxz * Rxz + gupyz * Ryz )
 
@@ -878,6 +893,7 @@
        gupxy * (Axy * Ayz + Ayy * Axz) + &
        gupxz * (Axy * Azz + Ayz * Axz) + &
        gupyz * (Ayy * Azz + Ayz * Ayz) ) ))- F16 * PI * rho
+!$omp end parallel workshare
 
 ! mov_Res_j = gupkj*(-1/chi d_k chi*A_ij + D_k A_ij) - 2/3 d_j trK - 8 PI s_j where D respect to physical metric
 ! store D_i A_jk - 1/chi d_i chi*A_jk in gjk_i
@@ -888,6 +904,7 @@
   call fderivs(ex,Ayz,gyzx,gyzy,gyzz,X,Y,Z,SYM ,ANTI,ANTI,Symmetry,0)
   call fderivs(ex,Azz,gzzx,gzzy,gzzz,X,Y,Z,SYM ,SYM ,SYM ,Symmetry,0)
 
+!$omp parallel workshare
   gxxx = gxxx - (  Gamxxx * Axx + Gamyxx * Axy + Gamzxx * Axz &
                  + Gamxxx * Axx + Gamyxx * Axy + Gamzxx * Axz) - chix*Axx/chin1
   gxyx = gxyx - (  Gamxxy * Axx + Gamyxy * Axy + Gamzxy * Axz &
@@ -937,6 +954,7 @@ movz_Res = gupxx*gxzx + gupyy*gyzy + gupzz*gzzz &
 movx_Res = movx_Res - F2o3*Kx - F8*PI*sx
 movy_Res = movy_Res - F2o3*Ky - F8*PI*sy
 movz_Res = movz_Res - F2o3*Kz - F8*PI*sz
+!$omp end parallel workshare
   endif
 
 

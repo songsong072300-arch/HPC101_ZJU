@@ -58,7 +58,15 @@ private:
        double *pc_sin_al, *pc_cos_al, *pc_Am1;   // size n1
        double *pc_sin_be, *pc_cos_be;            // size n2
        double *pc_sin_al3, *pc_sin_be3;          // sin(al)^3, sin(be)^3
-       double *pc_fac;                             // size n1*n2: sin_al^3 * sin_be^3
+        double *pc_fac;                             // size n1*n2: sin_al^3 * sin_be^3
+
+        // O19: Precomputed cos/sin lookup tables for chebft_Zeros/Extremes/fourft.
+        // Eliminates __cos (22.92% of TwoPuncture) on the spectral transform hot path.
+        double *pc_cos_cheb_zeros;    // size n_cheb*n_cheb, cos(Pi/n * j * (k+0.5))
+        double *pc_cos_cheb_extremes; // size (n_cheb-1)*(n_cheb-1), cos(Pi/(n-1) * j * k)
+        double *pc_cos_fourft;        // size n3*n3, cos(Pi/M * l * k)
+        double *pc_sin_fourft;        // size n3*n3, sin(Pi/M * l * k)
+        int pc_n_cheb_zeros, pc_n_cheb_extremes, pc_n_fourft;
 
        struct parameters
        {

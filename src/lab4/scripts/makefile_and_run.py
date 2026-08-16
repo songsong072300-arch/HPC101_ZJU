@@ -67,6 +67,39 @@ def run_TwoPunctureABE():
     print(f"\n Running TwoPunctureABE with OMP_NUM_THREADS={twop_omp}\n")
     cmd = "./TwoPunctureABE < /dev/null"
     _run_and_tee(cmd, "TwoPunctureABE_out.log")
+    # O16: Drop page cache after TwoPuncture to give ABE a clean memory
+    # state.  TwoPuncture's 30-thread run pollutes the Linux page cache;
+    # this degrades ABE's workshare regions (which are more sensitive to
+    # memory pressure than the serial baseline).
+    import subprocess as _sp, ctypes
+    _drop_rc = _sp.call(["bash", "-c",
+                         "sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null"])
+    if _drop_rc != 0:
+        print("  [O16] drop_caches failed, using fallback...")
+        # Fallback: posix_fadvise on files + memory pressure flush
+        _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        _POSIX_FADV_DONTNEED = 4
+        for _p in ["Ansorg.psid", "puncture_parameters_new.txt",
+                   "TwoPunctureABE_out.log"]:
+            try:
+                _fd = _libc.open(_p.encode(), 0)
+                if _fd >= 0:
+                    _libc.posix_fadvise(_fd, ctypes.c_long(0), ctypes.c_long(0),
+                                        ctypes.c_int(_POSIX_FADV_DONTNEED))
+                    _libc.close(_fd)
+            except Exception:
+                pass
+        # Memory pressure: touch 2GB to force kernel to reclaim
+        # TwoPuncture's anonymous pages.
+        try:
+            _size = 2048 * 1024 * 1024
+            _buf = (ctypes.c_char * _size)()
+            for _i in range(0, _size, 4096):
+                _buf[_i] = 0
+            del _buf
+            print("  [O16] fallback flush done (2GB)")
+        except Exception as _e:
+            print(f"  [O16] fallback flush failed: {_e}")
     print("\n The TwoPunctureABE simulation is finished\n")
 
 
