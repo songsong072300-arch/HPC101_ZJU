@@ -26,18 +26,27 @@ export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
 # ============================================================
 # O8 最佳配置默认值（判题器直接 ./run.sh 时自动生效，环境变量可覆盖）
 # unbound 调度: 空闲 rank 让出 CPU 给 owner-local 计算线程, 实测最快
+#
+# OJ 判题器会注入以下环境变量，必须全部强制覆盖：
+#   AMSS_MPIEXEC="mpiexec --bind-to core --map-by slot:pe=2"  → Out of resource
+#   OMP_PROC_BIND=close, OMP_PLACES=cores                     → 破坏 unbound 调度
+#   OMP_NUM_THREADS=60                                        → TwoPuncture 线程数错误
 # ============================================================
-export AMSS_ABE_OMP_THREADS="${AMSS_ABE_OMP_THREADS:-2}"
-export AMSS_TWOP_OMP_THREADS="${AMSS_TWOP_OMP_THREADS:-30}"
-export AMSS_SURFACE_COLLECTIVE="${AMSS_SURFACE_COLLECTIVE:-owner_local}"
-export AMSS_SURFACE_OMP_THREADS="${AMSS_SURFACE_OMP_THREADS:-16}"
-export OMP_PROC_BIND="${OMP_PROC_BIND:-false}"
+export AMSS_ABE_OMP_THREADS="2"
+export AMSS_TWOP_OMP_THREADS="30"
+export AMSS_SURFACE_COLLECTIVE="owner_local"
+export AMSS_SURFACE_OMP_THREADS="16"
+# 强制覆盖 OJ 注入的 OpenMP 绑定设置（unbound 调度需要）
+export OMP_PROC_BIND="false"
+export OMP_DYNAMIC="FALSE"
 unset OMP_PLACES 2>/dev/null || true
-# OJ 判题器会注入 AMSS_MPIEXEC="mpiexec --bind-to core --map-by slot:pe=2"，
-# 该配置要求 30x2=60 个 processing element 硬映射，但 OJ 容器能提供的 slot 数
-# 不足以满足（--use-hwthread-cpus 也救不了），报 "Out of resource" 直接 0 分。
-# 这里强制改用 unbound + oversubscribe：不要求硬映射 60 PE，30 个 MPI rank 在
-# 任何核数下都能启动；unbound 也是 O8 实测最快的调度方式，不会损失性能。
+# 强制覆盖 OJ 注入的 OMP_NUM_THREADS（OJ 会注入 60）
+# TwoPunctureABE 需要 30 线程（物理核数），ABE 需要 2 线程（每 rank）
+# makefile_and_run.py 会根据阶段覆盖此值，但先设为 30 防止 OJ 的 60 生效
+export OMP_NUM_THREADS="${AMSS_TWOP_OMP_THREADS:-30}"
+# 强制覆盖 OJ 注入的 AMSS_MPIEXEC（OJ 的 --bind-to core 会导致 30x2=60 PE
+# 硬映射失败 "Out of resource"）。unbound + oversubscribe 让 30 个 rank 在
+# 任何核数下都能启动，且 unbound 是 O8 实测最快的调度方式。
 export AMSS_MPIEXEC="mpiexec --allow-run-as-root --oversubscribe --use-hwthread-cpus --map-by slot --bind-to none --mca mpi_yield_when_idle 1"
 # ============================================================
 
