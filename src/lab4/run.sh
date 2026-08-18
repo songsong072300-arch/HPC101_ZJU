@@ -33,7 +33,16 @@ export AMSS_SURFACE_COLLECTIVE="${AMSS_SURFACE_COLLECTIVE:-owner_local}"
 export AMSS_SURFACE_OMP_THREADS="${AMSS_SURFACE_OMP_THREADS:-16}"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-false}"
 unset OMP_PLACES 2>/dev/null || true
-export AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec --allow-run-as-root --use-hwthread-cpus --map-by slot --bind-to none --mca mpi_yield_when_idle 1}"
+AMSS_MPIEXEC="${AMSS_MPIEXEC:-mpiexec --allow-run-as-root --map-by slot --bind-to none --mca mpi_yield_when_idle 1}"
+# OJ 判题器可能注入自己的 AMSS_MPIEXEC（如 --bind-to core --map-by slot:pe=2）。
+# 鲲鹏 920B 是 SMT2（30 物理核 = 60 逻辑核）；缺 --use-hwthread-cpus 时 OpenMPI
+# 只认 30 个物理核，-n 30 --map-by slot:pe=2 需要 60 个 processing element，
+# 会报 "Out of resource"。这里幂等地补上 SMT 逻辑核识别（已有则跳过）。
+case " $AMSS_MPIEXEC " in
+  *" --use-hwthread-cpus "*|*" --oversubscribe "*) : ;;
+  *) AMSS_MPIEXEC="$AMSS_MPIEXEC --use-hwthread-cpus" ;;
+esac
+export AMSS_MPIEXEC
 # ============================================================
 
 ROOT_DIR="$(pwd)"
