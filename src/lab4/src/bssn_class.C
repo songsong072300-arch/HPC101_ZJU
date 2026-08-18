@@ -1924,7 +1924,11 @@ void bssn_class::Step(int lev, int YN)
     }
     Pp = Pp->next;
   }
-  // O20: removed NaN-check MPI_Allreduce; local ERROR still set, will propagate via transfer/Sync
+  // check error information
+  {
+    int erh = ERROR;
+    MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  }
   if (ERROR)
   {
     Parallel::Dump_Data(GH->PatL[lev], StateList, 0, PhysTime, dT_lev);
@@ -2046,7 +2050,12 @@ void bssn_class::Step(int lev, int YN)
       Pp = Pp->next;
     }
 
-    // O20: removed NaN-check MPI_Allreduce; local ERROR still set, will propagate via transfer/Sync
+    // check error information
+    {
+      int erh = ERROR;
+      MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    }
+
     if (ERROR)
     {
       Parallel::Dump_Data(GH->PatL[lev], SynchList_pre, 0, PhysTime, dT_lev);

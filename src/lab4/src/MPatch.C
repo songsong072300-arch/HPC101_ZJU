@@ -442,10 +442,15 @@ void Patch::Interp_Points_Impl(MyList<var> *VarList,
 #ifdef _OPENMP
     interp_threads = omp_get_max_threads();
 #endif
+    // O8: default to 16 threads for owner-local surface interpolation.
+    // run.sh sets AMSS_SURFACE_OMP_THREADS=16, but OJ's makefile_and_run.py
+    // may not forward it, so use 16 as default when env var is unset.
     const char *surface_threads_env = std::getenv("AMSS_SURFACE_OMP_THREADS");
-    if (local_weight != nullptr && surface_threads_env != nullptr)
+    if (local_weight != nullptr)
     {
-        const int requested_threads = std::atoi(surface_threads_env);
+        int requested_threads = 16;
+        if (surface_threads_env != nullptr)
+            requested_threads = std::atoi(surface_threads_env);
         if (requested_threads < 1)
         {
             if (myrank == 0)

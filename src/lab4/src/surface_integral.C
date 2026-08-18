@@ -897,8 +897,11 @@ void surface_integral::surf_MassPAng(double rex, int lev, cgh *GH, var *chi, var
 #ifdef USE_GPU
   GH->PatL[lev]->data->Interp_Points(DG_List, n_tot, pox, shellf, Symmetry);
 #else
+  // O8: owner_local is the optimal collective mode (default when env var unset).
+  // run.sh sets AMSS_SURFACE_COLLECTIVE=owner_local, but OJ's makefile_and_run.py
+  // may not forward it, so hardcode owner_local as the default here.
   const char *surface_collective = std::getenv("AMSS_SURFACE_COLLECTIVE");
-  const bool use_owner_local = surface_collective != nullptr &&
+  const bool use_owner_local = surface_collective == nullptr ||
       std::strcmp(surface_collective, "owner_local") == 0;
   const bool use_allreduce = surface_collective != nullptr &&
       std::strcmp(surface_collective, "allreduce") == 0;

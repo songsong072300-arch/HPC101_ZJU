@@ -12,6 +12,9 @@
 #include <string>
 #include <cmath>
 #include <strstream>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 using namespace std;
 #else
 #include <iostream.h>
@@ -89,6 +92,18 @@ int parse_parts(string str, string &sgrp, string &skey, string &sval, int &ind)
 //=======================================
 int main(int argc, char *argv[])
 {
+  // O1: TwoPuncture uses OpenMP; cap to 30 threads (physical core count)
+  // to avoid oversubscription when OJ injects OMP_NUM_THREADS=60.
+  // run.sh sets AMSS_TWOP_OMP_THREADS=30, but AMSS_NCKU_Program.py may
+  // not forward it, so enforce the cap here.
+#ifdef _OPENMP
+  {
+    const char *twop_env = std::getenv("AMSS_TWOP_OMP_THREADS");
+    int twop_threads = twop_env ? std::atoi(twop_env) : 30;
+    if (twop_threads < 1) twop_threads = 30;
+    omp_set_num_threads(twop_threads);
+  }
+#endif
   double mp, mm, b, Mp, Mm, admtol, Newtontol;
   int nA, nB, nphi, Newtonmaxit;
   double P_plusx, P_plusy, P_plusz;
