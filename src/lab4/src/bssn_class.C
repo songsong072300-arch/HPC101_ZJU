@@ -3061,13 +3061,10 @@ void bssn_class::Constraint_Out()
 
     for (int levi = 0; levi < GH->levels; levi++)
     {
-      ConV[0] = Parallel::L2Norm(GH->PatL[levi]->data, Cons_Ham);
-      ConV[1] = Parallel::L2Norm(GH->PatL[levi]->data, Cons_Px);
-      ConV[2] = Parallel::L2Norm(GH->PatL[levi]->data, Cons_Py);
-      ConV[3] = Parallel::L2Norm(GH->PatL[levi]->data, Cons_Pz);
-      ConV[4] = Parallel::L2Norm(GH->PatL[levi]->data, Cons_Gx);
-      ConV[5] = Parallel::L2Norm(GH->PatL[levi]->data, Cons_Gy);
-      ConV[6] = Parallel::L2Norm(GH->PatL[levi]->data, Cons_Gz);
+      // E3: Batch L2Norm — 1 Allreduce instead of 7
+      double ConV_tmp[7];
+      Parallel::L2Norm_7(GH->PatL[levi]->data, Cons_Ham, Cons_Px, Cons_Py, Cons_Pz, Cons_Gx, Cons_Gy, Cons_Gz, ConV_tmp);
+      for (int k = 0; k < 7; k++) ConV[k] = ConV_tmp[k];
       ConVMonitor->writefile(PhysTime, 7, ConV);
     }
 
@@ -3196,18 +3193,27 @@ void bssn_class::Interp_Constraint(bool infg)
   }
   double *shellf;
   shellf = new double[n * InList];
-  for (int i = 0; i < n; i++)
+  // E1: Batch interpolation — use Interp_Points on level 0
+  // Constraint points span the full grid, so use the coarsest level
   {
-    double XX[3];
-    XX[0] = x1[i];
-    XX[1] = y1[i];
-    XX[2] = z1[i];
-    bool fg = GH->Interp_One_Point(ConstraintList, XX, shellf + i * InList, Symmetry);
-    if (!fg && myrank == 0)
+    // Interp_Points expects XX[dim][NN] layout
+    double *xbuf = new double[n];
+    double *ybuf = new double[n];
+    double *zbuf = new double[n];
+    for (int i = 0; i < n; i++)
     {
-      cout << "bssn_class::Interp_Constraint meets wrong" << endl;
-      MPI_Abort(MPI_COMM_WORLD, 1);
+      xbuf[i] = x1[i];
+      ybuf[i] = y1[i];
+      zbuf[i] = z1[i];
     }
+    double *XX[3];
+    XX[0] = xbuf;
+    XX[1] = ybuf;
+    XX[2] = zbuf;
+    GH->PatL[0]->data->Interp_Points(ConstraintList, n, XX, shellf, Symmetry);
+    delete[] xbuf;
+    delete[] ybuf;
+    delete[] zbuf;
   }
 
   if (myrank == 0)

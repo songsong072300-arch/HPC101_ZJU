@@ -76,11 +76,11 @@ def run_TwoPunctureABE():
                          "sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null"])
     if _drop_rc != 0:
         print("  [O16] drop_caches failed, using fallback...")
-        # Fallback: posix_fadvise on files + memory pressure flush
         _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        # 1. posix_fadvise on TwoPuncture's files (file-backed pages)
         _POSIX_FADV_DONTNEED = 4
         for _p in ["Ansorg.psid", "puncture_parameters_new.txt",
-                   "TwoPunctureABE_out.log"]:
+                    "TwoPunctureABE_out.log"]:
             try:
                 _fd = _libc.open(_p.encode(), 0)
                 if _fd >= 0:
@@ -89,8 +89,13 @@ def run_TwoPunctureABE():
                     _libc.close(_fd)
             except Exception:
                 pass
-        # Memory pressure: touch 2GB to force kernel to reclaim
-        # TwoPuncture's anonymous pages.
+        # 2. malloc_trim(0): return free heap to kernel
+        try:
+            _libc.malloc_trim(ctypes.c_size_t(0))
+            print("  [O16] malloc_trim(0) done")
+        except Exception:
+            pass
+        # 3. Memory pressure: touch 2GB to force kernel reclaim
         try:
             _size = 2048 * 1024 * 1024
             _buf = (ctypes.c_char * _size)()

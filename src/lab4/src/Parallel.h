@@ -97,6 +97,9 @@ namespace Parallel
                                      int Symmetry);
     void Sync(Patch *Pat, MyList<var> *VarList, int Symmetry);
     void Sync(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry);
+    // O22: Split Sync for compute-communication overlap
+    void Sync_Send(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry);
+    void Sync_Recv();
 #ifdef USE_GPU
     void Sync_GPU(Patch *Pat, MyList<var> *VarList, int Symmetry);
     void Sync_GPU(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry);
@@ -155,6 +158,7 @@ namespace Parallel
                                                  MyList<Parallel::gridseg> **out_src, MyList<Parallel::gridseg> **out_dst);
     void PeriodicBD(Patch *Pat, MyList<var> *VarList, int Symmetry);
     double L2Norm(Patch *Pat, var *vf);
+    void L2Norm_7(Patch *Pat, var *v0, var *v1, var *v2, var *v3, var *v4, var *v5, var *v6, double *out);
     void checkgsl(MyList<Parallel::gridseg> *pp, bool first_only);
     void checkvarl(MyList<var> *pp, bool first_only);
     MyList<Parallel::gridseg> *divide_gsl(MyList<Parallel::gridseg> *p, Patch *Pat);

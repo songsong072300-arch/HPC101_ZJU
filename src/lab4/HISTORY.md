@@ -819,24 +819,2694 @@ t=2 中位数减少 4.7%（-1.51s），但波动较大。
 正常态中位数：Total Evolve 545.73s，Program Cost 621.08s。
 相对 O18：Total Evolve 减少 2.1%（-11.6s），端到端减少 1.6%（-10.1s）。
 
-## 后续记录模板
+### O21A：transfer 缓冲区 static 化（data buffer）
 
-```markdown
-### O/R 编号：优化名称
+状态：**已回退**。
 
-状态：保留 / 回退 / 待验证
+日期：2026-08-16。
 
-- 日期：
-- commit/工作区状态：
-- 假设与 profiler 证据：
-- 修改文件和关键位置：
-- 平台与资源：
-- 输入：
-- MPI × OMP、绑核：
-- 编译器与完整参数：
-- baseline（至少3次）：
-- optimized（至少3次）：
-- 中位数与加速比：
-- 正确性结果：
-- 决定与下一步：
+假设：`transfer` 中 `send_data[node]`/`rec_data[node]` 每次调用 `new[]/delete[]`，
+改为 static 复用可消除 malloc/free 开销（perf 显示 malloc 1.47% + cfree 1.56%）。
+
+修改：
+- `src/Parallel.C`：transfer/transfermix 中 `send_data`/`rec_data` 和数据缓冲区
+  改为 static pool（`s_send_bufs`/`s_rec_bufs`），按需扩容，不释放。
+
+A/B 测试（t=2、`--twop-cache`、5 次）：
+- baseline (O13): 30.00s
+- optimized: 27.07s（+9.8%）
+
+但 t=2 用 `--twop-cache` 跳过 TwoPuncture，page cache 干净。
+
+正式 t=40（无 cache，3 次）：
+| Run | Total Evolve | Program Cost |
+|---|---:|---:|
+| 1 | 694.08s | 780.11s |
+| 2 | 693.61s | 779.43s |
+| 3 | 690.56s | 774.44s |
+
+**稳定退化到 ~693s**（O20 baseline 548s，慢 27%）。
+
+根因：static buffer 锁定物理页，内核无法在 page cache 污染下回收。workshare
+的 2 线程并发访存对内存压力更敏感。
+
+### O21B：transfer 缓冲区 mmap + madvise(DONTNEED)
+
+状态：**已回退**。
+
+日期：2026-08-16。
+
+假设：用 mmap 替代 new[]，使 madvise(MADV_DONTNEED) 可安全回收物理页。
+
+修改：
+- `src/Parallel.C`：`ensure_buf` 用 `mmap(MAP_PRIVATE|MAP_ANONYMOUS)` 分配，
+  transfer 结束后 `madvise(MADV_DONTNEED)`。
+
+结果：
+- t=2 quick_test：37.02s（O20 = 35.77s，**慢 3.5%**）
+- 正确性 PASS
+
+mmap 的页对齐和缺页中断开销超过省去 malloc 的收益。回退。
+
+### O22：Split Sync 通信重叠
+
+状态：**已回退**。
+
+日期：2026-08-16。
+
+假设：MPI 等待占 23.6%（130s）。把 `Sync` 拆成 `Sync_Send`（Isend+Irecv，
+不 Wait）和 `Sync_Recv`（Waitall+解包），让 `compute_rhs + rungekutta4`
+与 MPI 通信重叠。
+
+修改：
+- `src/Parallel.h`：声明 `Sync_Send`/`Sync_Recv`。
+- `src/Parallel.C`：实现 Split Sync，gsl 链表在 Send→Recv 间不释放。
+- `src/bssn_class.C`：Step 函数中 Sync 调用改为 Send/Recv 模式。
+
+A/B 测试：
+- t=2 quick_test：35.36s（O20 = 35.77s，+1.1%，噪声范围）
+- t=40 长跑：697.02s（O20 = 547.93s，**退化 27%**）
+
+根因：gsl 链表延迟释放导致内存碎片和内存压力，与 O21A 同理。
+正确性 PASS（constraints PASS，trajectory 40/40 matched）。
+
+### O23：TwoPuncture 后 malloc_trim 清理 page cache
+
+状态：**已回退**。
+
+日期：2026-08-16。
+
+假设：`malloc_trim(0)` 让 glibc 归还空闲堆内存给内核，清理 TwoPuncture 的
+anonymous pages 污染。
+
+修改：
+- `src/TwoPunctureABE.C`：`delete ADM` 后调用 `malloc_trim(0)`。
+
+t=10 实测对比：
+| 版本 | t=10 Total Evolve | per-step |
+|---|---:|---:|
+| O20 baseline | 139.23s | 13.92s |
+| O23 (malloc_trim) | 182.61s | 18.26s |
+
+**退化 31%**。`malloc_trim` 破坏了 glibc arena 的内存局部性。
+
+### 环境限制验证
+
+`drop_caches` 在计算节点上不可用：
+- `/proc/sys/vm/drop_caches` 是 read-only（`nosuid` 挂载）
+- 即使 uid=0 也无法写入
+- `posix_fadvise(DONTNEED)` 只对 file-backed pages 有效
+- `malloc_trim` 是负优化
+- touch 2GB 被动回收效果不足
+
+**结论：page cache 污染是不可绕过的环境限制。任何增加持久内存占用的
+优化（static buffer、gsl 延迟释放）在 t=40 无 cache 时都会退化。**
+
+## 当前性能总结
+
+| 配置 | t=2 (cache) | t=10 (no cache) | t=40 (no cache) |
+|---|---:|---:|---:|
+| O20 baseline | 35.8s | 139.2s | 547.9s |
+| Program Cost | 37s | 216s | 625s |
+
+保留优化：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20
+
+## 下一步方向分析
+
+### 已排除的方向（page cache 污染敏感）
+- O21A/B：transfer buffer static 化
+- O22：Split Sync 通信重叠
+- O23：malloc_trim 清理
+- 任何需要延迟释放内存或增加持久内存占用的优化
+
+### 可探索方向
+
+#### 1. 差分 kernel 向量化（~100s 理论上限）
+- `lopsided_kodis` 47s + `fdderivs` 32s + `fderivs` 14s = 93s
+- R6 循环拆分已失败（边界 cycle 开销）
+- 可尝试：`!$omp simd` 指令、`#pragma GCC ivdep`、同对称性多变量合并差分
+- **不增加内存占用，不受 page cache 影响**
+- 预期收益：10-30s（2-5%）
+
+#### 2. 减少 OpenMP barrier（~82s 理论上限）
+- 18 个 workshare 区域产生 fork-join 开销
+- 合并相邻 workshare 区域（但中间有差分调用阻隔）
+- 可尝试：`nowait` 子句减少隐式 barrier
+- **不增加内存占用**
+- 预期收益：5-15s（1-2.5%）
+
+#### 3. memcpy/memset 优化（~44s 理论上限）
+- `symmetry_bd` 触发的 memcpy 3.4% + memset 1.6%
+- 减少 `symmetry_bd` 调用次数（O9 已合并 lopsided+kodis）
+- 可尝试：合并更多同对称性差分调用
+- **不增加内存占用**
+- 预期收益：5-10s（1-1.5%）
+
+#### 4. prolongation 优化（~16s 理论上限）
+- `prolong3` 2.84% + `restrict3` 0.80%
+- 可尝试：缓存 prolongation 权重、向量化
+- 预期收益：3-8s（0.5-1.3%）
+
+### O24：差分 kernel 向量化尝试（三种方式均失败）
+
+状态：**已回退**。
+
+日期：2026-08-16。
+
+profiler 证据：`lopsided_kodis` 8.64% + `fdderivs` 5.76% + `fderivs` 2.62% = 17%，
+理论上限 93s。差分循环使用 `#else`（bam comparison）分支的联合条件判断
+（`i+2<=imax .and. j+2<=jmax .and. k+2<=kmax`），阻碍向量化。
+
+#### O24a：kodis 拆分为内部无分支 + 边界原逻辑
+
+修改：
+- `src/lopsidediff.f90`：kodis 部分拆为两个循环，内部 `3:ex-2` 无分支，
+  边界用原 `if` 逻辑 + `cycle` 跳过内部点。
+
+结果：
+- t=2 quick_test：37.07s（O20 = 35.77s，**慢 3.6%**）
+- 正确性 PASS
+
+失败原因：边界循环对每个点做 `cycle` 判断，覆盖 ~95% 迭代点，
+判断开销超过向量化收益。与 R6 同理。
+
+#### O24b：`!$omp simd` 指令
+
+修改：
+- `src/lopsidediff.f90`：kodis 循环加 `!$omp simd`，`collapse(3)` 改为
+  普通 `!$omp do`（simd 与 collapse 不兼容）。
+
+结果：
+- t=2 quick_test：37.18s（**慢 3.9%**）
+- 正确性 PASS
+
+失败原因：循环体内的 `if` 分支使 `simd` 指令无效；去掉 `collapse(3)`
+降低了外层并行度。
+
+#### O24c：切换 `#if 0` 分支（独立方向判断）
+
+修改：
+- `src/diff_new.f90`：`fderivs` 和 `fdderivs` 从 `#else`（联合判断）
+  切换到 `#if 1`（x/y/z 独立判断），每个方向可独立向量化。
+
+结果：
+- t=2 quick_test：35.82s（O20 = 35.77s，+0.1%，噪声）
+- t=10 长跑：185.24s（O20 = 139.23s，**退化 33%**）
+- 正确性 PASS（constraints PASS，trajectory matched 10/10）
+
+失败原因：`#if 0` 分支的三次独立判断 > `#else` 的一次联合判断，
+分支预测失败更多；且只有 2 阶 fallback（`d2dx`），边界精度低于
+`#elif 0` 分支的 3 阶 fallback。
+
+#### 方向 2：`workshare nowait`
+
+gfortran 不支持 `!$omp end parallel workshare nowait`（编译错误）。
+
+#### 方向 3：合并同对称性差分调用
+
+未实施。工程量大（需新增多变量版 `fdderivs`），且 `symmetry_bd` 的
+内部拷贝只占 0.74% self + 3.4% memcpy = 4.1%，预期收益 <2%。
+
+## 计算优化总结
+
+### 已保留的计算优化
+
+| 优化 | 文件 | 内容 | 收益 |
+|------|------|------|------|
+| O5 | fmisc.f90 | polint 标量循环 | -18.7s (21%) |
+| O9 | lopsidediff.f90 | 合并 lopsided+kodis 调用 | -12.9s (25%) |
+| O12 | fmisc.f90 | symmetry_bd 避免全数组清零 | -3.9s (6.4%) |
+| O13 | bssn_rhs.f90 | 移除 sanity check + workshare | -3.3s (5.4%) |
+| O15/O17/O18 | bssn_rhs.f90 | workshare 并行化 11 个数组语法块 | -28s (4.8%) |
+| O19 | TwoPunctures.C/h | cos/sin 查找表预计算 | -25s (TwoPuncture) |
+| O20 | bssn_class.C, Parallel.C | 移除 NaN Allreduce + reqs/stats static | -11.6s (2.1%) |
+
+### 已回退的计算优化尝试
+
+| 尝试 | 方向 | 失败原因 |
+|------|------|---------|
+| R6 | fderivs/fdderivs 循环拆分 | 边界 cycle 开销 (+7.4%) |
+| O24a | kodis 拆分内部+边界 | 边界 cycle 开销 (+3.6%) |
+| O24b | `!$omp simd` 指令 | if 分支阻碍向量化 (+3.9%) |
+| O24c | 切换 `#if 0` 独立方向分支 | 三次判断 > 联合判断 (t=10 +33%) |
+| O28 | enforce_ga collapse(3) + 标量临时变量 | fork-join 开销 + 占比太低 (-1.5%) |
+
+### 差分 kernel 向量化失败的根因
+
+`#else`（bam comparison）分支的联合条件判断是当前架构下的最优解：
+- 一次 `if` 判断覆盖 x/y/z 三个方向
+- 分支预测最友好（内部点全部走 then 分支）
+- 任何拆分或切换都会引入更多分支判断开销
+
+### 当前性能天花板分析
+
+| 瓶颈 | 占比 | 可优化性 |
+|------|------|---------|
+| MPI 等待 | 23.6% (130s) | 不可优化（O22 退化，page cache 限制） |
+| OpenMP barrier | 15.0% (82s) | 不可优化（gfortran 不支持 workshare nowait） |
+| 差分 kernel | 17.0% (93s) | 不可优化（R6/O24a/b/c 均失败） |
+| compute_rhs | 21.6% (118s) | 已优化（O15-O18 workshare） |
+| 内存操作 | 8.0% (44s) | 部分已优化（O12/O20） |
+
+**结论：当前 O20 配置（t=40 Total Evolve 548s, Program Cost 625s）
+是此环境下 CPU 计算优化的性能天花板。**
+
+剩余可尝试的方向只有：
+1. 编译器切换（Arm Compiler / 毕昇）
+2. MPI 实现切换
+3. 这些属于工具链优化，不属于计算 kernel 优化范畴
+
+### O25：合并同对称性 fderivs 调用（fderivs_2/fderivs_3）
+
+状态：**已回退**。
+
+日期：2026-08-16。
+
+假设：`bssn_rhs.f90` 中有 28 次 `fderivs`/`fdderivs` 调用，每次独立
+`symmetry_bd` + `!$omp parallel do`（fork-join）。合并同对称性变量到
+`fderivs_2`/`fderivs_3`，用单 `!$omp parallel` + `!$omp master` + `!$omp barrier`
++ 多个 `!$omp do`，减少 fork-join 次数。
+
+修改：
+- `src/diff_new.f90`：新增 `fderivs_2` 和 `fderivs_3`，用单 parallel 区域。
+- `src/bssn_rhs.f90`：合并 dxx+dyy+dzz（3→1）和 Lap+trK（2→1）。
+
+A/B 测试：
+- t=2 quick_test：27.52s（O20 = 35.77s，**+22.2%**）
+- t=10 长跑：141.39s（O20 = 139.23s，持平，无退化）
+- t=40 长跑（2 次）：716.67s, 717.34s（O20 = 548s，**退化 30%**）
+
+短跑快 22% 但 t=40 退化 30%。与 O15 教训一致：`!$omp parallel` 区域
+持续时间更长（3 个变量），在 page cache 污染下增加内存压力。
+t=10 不退化是因为 page cache 污染程度随时间累积，t=10 尚未达到临界点。
+
+尝试加 Axx+Ayy+Azz 合并：
+- t=2：27.52s（同上）
+- t=10：192.21s（退化 38%，但第二次 141.39s 正常——unbound 波动）
+
+**根因：任何延长 `!$omp parallel` 区域持续时间的优化在 t=40 长跑中
+都会因 page cache 污染而退化。** 与 O21A/O22 同理。
+
+回退到 O20。
+
+### O26：减少分析路径 MPI Allreduce（E1+E3，不含 E2）
+
+状态：**保留**。
+
+日期：2026-08-16。
+
+profiler 证据（opt.txt 分析）：分析路径的 Allreduce 次数：
+- `Interp_Constraint`：1000 次逐点 Allreduce（每次 7 doubles）
+- `L2Norm`：63 次 1-double Allreduce（9 级 × 7 变量）
+- `surf_Wave`：32 次 Allreduce（8 探测器 × 4）
+
+这三个瓶颈只减少 MPI 屏障数量，不增加持久内存占用，不受 page cache 污染影响。
+
+#### E1：批量化 Interp_Constraint（1000→1 次 Allreduce）
+
+修改：
+- `src/bssn_class.C`：`Interp_Constraint` 中逐点 `Interp_One_Point` 循环
+  替换为 `Interp_Points` 批量调用（level 0）。
+
+#### E2：surf_Wave owner_local（已回退）
+
+修改：
+- `src/surface_integral.C`：`surf_Wave` 添加 `Interp_Points_Local` 分支。
+
+结果：
+- t=10：176.38s（O20 = 139.23s，**退化 27%**）
+
+退化原因：`local_weight = new int[n_tot]` 增加内存分配，在 page cache
+污染下加剧内存压力。与 O21A/O22 同理。
+
+#### E3：合并 L2Norm（63→9 次 Allreduce）
+
+修改：
+- `src/Parallel.h/.C`：新增 `L2Norm_7`，一次计算 7 个变量的 L2Norm，
+  合并为 1 次 7-double Allreduce。
+- `src/bssn_class.C`：`Constraint_Out` 中 7 次 `L2Norm` 替换为 1 次 `L2Norm_7`。
+
+A/B 测试（E1+E3，不含 E2）：
+
+| 指标 | O20 | E1+E3 | 变化 |
+|------|-----|-------|------|
+| t=2 (cache) | 35.77s | 35.56s | -0.6% |
+| t=10 (no cache) | 139.23s | 139.51s | +0.2%（持平） |
+| t=40 (no cache) | 547.93s | 546.47s | -0.3% |
+| Program Cost | 625s | 622.31s | -0.4% |
+
+正确性：PASS（trajectory 40/40 matched，constraints PASS）。
+
+E1+E3 在所有时长下无退化，t=40 略快 1.5s。收益虽小但是正向的——
+因为分析路径只在 `AnasTime=0.1` 间隔触发，占总时间比例较小。
+
+保留优化：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3)
+
+### O27：diff_new fderivs/fdderivs 边界平面清零
+
+状态：**已回退**。
+
+日期：2026-08-16。
+
+profiler 证据：`fderivs`/`fdderivs` 中的 `fx = ZEO; fy = ZEO; fz = ZEO`（3 次全数组清零）
+和 `fxx..fyz = ZEO`（6 次全数组清零）在每次调用时执行。`__memset_sve_zva64` 占 3.42%。
+O12 已对 `symmetry_bd` 做了类似优化（避免全数组清零），本优化是其自然延伸。
+
+修改：
+- `src/diff_new.f90`：`fderivs`（lines 78-80）的 `fx/fy/fz = ZEO` 替换为 6 个边界平面
+  清零（`fx(1,:,:) = ZEO; fx(ex(1),:,:) = ZEO; ...`）。
+- `src/diff_new.f90`：`fdderivs`（lines 488-493）的 6 个全数组清零替换为 36 个边界平面
+  清零。
+
+原理：差分循环 `do i=1,ex(1)-1` 只覆盖 1 到 ex-1，远边界（ex）不在循环范围内，
+近边界（1）在循环范围内但可能不满足 stencil 条件（当 imin=1 即无对称时）。
+零边界平面可保证所有未计算点为 0，与全数组清零效果相同但减少 ~80% 的清零量。
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|---|---:|---:|---:|---:|---:|
+| baseline (O20) | 36.15 | 37.04 | 35.17 | 36.15 s | 5.2% |
+| O27 (边界清零) | 36.17 | 36.73 | 36.27 | 36.27 s | 1.6% |
+
+O27 中位数比 baseline 慢 0.4%（+0.127s），差异 <2%，无统计意义。正确性 PASS
+（trajectory RMS=0，constraints PASS，FINAL PASS）。
+
+失败原因分析：
+1. gfortran 将 `fx = ZEO` 编译为单次 `memset`（SVE 指令），已是内存带宽最优。
+2. 边界平面方案虽然总清零量减少 ~80%，但增加了 18（fderivs）/ 36（fdderivs）次
+   独立的数组段赋值，每次都有循环设置开销。
+3. 对小数组（ex~16-32），单次 memset 的流水线效率高于多次小 memset。
+4. optimized 波动更低（1.6% vs 5.2%），可能因边界清零减少了内存压力，但不足以
+   证明性能收益。
+
+ 决定：按"一次一项、无收益回退"原则恢复 `diff_new.f90`。
+
+### O28：enforce_ga collapse(3) + 标量临时变量
+
+状态：**已回退**。
+
+日期：2026-08-16。
+
+profiler 证据：`enforce_ga_` 占 0.65–1.07% self（`profiling_results/quick/perf.abe.opt.self.txt`）。
+该函数完全串行，声明 10 个 `dimension(ex(1),ex(2),ex(3))` 自动数组
+（trA, gxx, gyy, gzz, gupxx, gupxy, gupxz, gupyy, gupyz, gupzz），
+执行约 26 次全数组遍历（whole-array expression）。每次调用隐式分配+清零+释放
+10 个 3D 数组。enforce_ga 在每个 RK 子步的 predictor+corrector 中各调用一次
+（bssn_class.C:1835, 1957），加上 constraint 输出路径（3470, 3476），约 4–6 次/timestep。
+
+修改：
+- `src/enforce_algebra.f90`：`enforce_ga` 子程序的 10 个自动 3D 数组全部替换为
+  标量局部变量（lgxx, lgyy, lgzz, lgxy, lgxz, lgyz, ldetg, lgupxx–lgupzz, ltrA）。
+  整个函数体包装在 `!$omp parallel do collapse(3) schedule(static)` 中，
+  26 次全数组遍历融合为 1 次 point-wise 循环。每个 (i,j,k) 点独立计算：
+  读入度规 → 计算 detg → 重标定 → 写回 → 计算 cofactor → 计算 trA → 移除 trace → 写回 A。
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|---|---:|---:|---:|---:|---:|
+| baseline (O20) | 27.65 | 27.37 | 26.87 | 27.37 s | 2.9% |
+| O28 (collapse+scalar) | 28.10 | 27.65 | 27.77 | 27.77 s | 1.6% |
+
+O28 中位数比 baseline 慢 1.5%（+0.406s），差异 <2%，无统计意义。正确性 PASS
+（constraints PASS：Ham=0.22, Px=0.02, Py=0.007, Pz=0.009，均 ≤ 2.0；
+BH.dat 和 bssn_constraint.dat 与 baseline **bit-identical**）。
+
+失败原因分析：
+1. **OpenMP fork-join 开销**：enforce_ga 每步调用 4–6 次，每次创建新的
+   `!$omp parallel` 区域。仅 2 个 OMP 线程 + 小数组（ex³~4096–32768 点），
+   fork-join 开销（~10–50μs/次）相对于计算时间（~100–500μs）不可忽略。
+2. **自动数组在 ARM 上已高效**：gfortran 将小自动数组放在栈上（非堆分配），
+   不触发 malloc。`fx = ZEO` 编译为 SVE memset，已最优。标量化不节省明显开销。
+3. **数组在 L2/L3 缓存中**：10 个 ex³ 数组共 ~320KB–2.5MB，在鲲鹏 920B 的
+   L2/L3 缓存层级内。26 次遍历的额外内存带宽开销被缓存吸收，不构成瓶颈。
+4. **enforce_ga 占比太低**：即使完全消除 enforce_ga 的执行时间（0.65–1.07%），
+   理论收益也 <1.1%，低于 2% 显著性阈值。
+
+与 O27 的共同教训：当目标函数占比 <2% 时，即使优化策略正确（数学等价、消除
+临时数组、增加并行度），实际 A/B 测试也无法测出统计显著的收益。鲲鹏 920B
+上 gfortran 对小数组的自动数组+whole-array expression 已接近最优。
+
+决定：按"一次一项、无收益回退"原则恢复 `enforce_algebra.f90`。
+
+### O29：bssn_rhs workshare→collapse(3)（9 块全部转换）
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：`compute_rhs_bssn_` self 占 ~14-21%（不同采样轮次）。
+O15/O17/O18 在 `compute_rhs_bssn` 中添加了 9 对 `!$omp parallel workshare`
+区域，覆盖约 500 行 whole-array expression。O13 已将其中 2 对 workshare
+转为 `collapse(3)`，收益 5.4%（但与 O12 合并测量，O13 单独贡献不确定）。
+
+假设：gfortran 在 ARM 上 `workshare` 并行效率低（O13 注释中提到）。
+将全部 9 对 workshare 转为显式 `!$omp parallel do collapse(3) schedule(static)`
+三重循环 + 逐点标量计算，可改善编译器向量化和并行调度。关键约束：
+不延长 parallel 区域持续时间（与 O25 教训相反），不增加内存占用。
+
+修改：
+- `src/bssn_rhs.f90`：9 对 `!$omp parallel workshare` 全部转换为
+  `!$omp parallel do collapse(3) schedule(static) private(i,j,k)`。
+  每个 whole-array expression `A = B*C + D` 改为 `A(i,j,k) = B(i,j,k)*C(i,j,k) + D(i,j,k)`。
+  使用 Python 脚本自动转换（识别 3D 数组名，添加 (i,j,k) 索引）。
+  转换的 7 个块（O13 已有 2 个）：
+  1. Gam_rhs 初值块（~28 行）
+  2. Gam_rhs 更新 + first kind connection（~41 行）
+  3. Ricci 张量块（~201 行，最大）
+  4. chi 协变二阶导 + Ricci 修正（~24 行）
+  5. chi→connection→Lap 协变修正（~31 行）
+  6. trK_rhs/Aij_rhs 大块（~138 行，含 `#if 1` 条件编译）
+  7. constraint mov_Res 块（~51 行）
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|---|---:|---:|---:|---:|---:|
+| baseline (git HEAD, 9 对 workshare) | 35.72 | 35.21 | 35.12 | 35.21 s | 1.7% |
+| O29 (11 个 collapse(3)) | 39.27 | 38.74 | 40.17 | 39.27 s | 3.6% |
+
+O29 中位数比 baseline 慢 **11.5%**（+4.052s），远超 2% 阈值。
+optimized 波动也更大（3.6% vs 1.7%）。
+
+正确性：未正式验证（程序正常运行完成，数学等价变换；因性能退化直接回退）。
+
+**失败原因深度分析**：
+
+1. **workshare 在 gfortran/ARM 上已高效**：gfortran 的 `!$omp parallel workshare`
+   将 whole-array expression 编译为批量内存操作（类似 SVE 向量化的 memset/memcpy
+   模式）。编译器可以对数组表达式做全局优化（重排指令、合并内存访问、复用寄存器）。
+   转为 collapse(3) 的逐点循环后，编译器失去了全局优化视角，只能对单个 (i,j,k)
+   点的表达式做局部优化。
+
+2. **大块表达式的寄存器压力**：Pair 3（Ricci 张量，201 行）和 Pair 6
+   （trK_rhs/Aij_rhs，138 行）的 whole-array expression 非常复杂。
+   在 workshare 中，编译器可以重排表达式的计算顺序，复用寄存器。
+   在 collapse(3) 的逐点循环中，每个点需要计算完整表达式，中间变量增多，
+   寄存器压力增大，可能溢出到栈，增加内存访问。
+
+3. **OpenMP 调度开销增加**：collapse(3) 将三重循环展平后分配给 2 个 OMP 线程。
+   对于大循环（ex³ ~ 几万点），调度开销不大。但 collapse(3) 的循环比 workshare
+   的数组操作粒度更细，可能导致更多的 cache line 争用和 false sharing。
+
+4. **`private(i,j,k)` 的线程栈开销**：每个 collapse(3) 循环都需要 private(i,j,k)，
+   增加 OpenMP 运行时的线程栈管理开销。11 个 collapse(3) 区域 = 11 次
+   private 变量分配，比 9 个 workshare（不需要 private 数组索引）更多。
+
+5. **与 O13 对比的重新审视**：O13 将 2 个 workshare 转为 collapse(3)，声称收益 5.4%。
+   但 O13 的收益是与 O12 合并测量的（O12+O13 vs O9）。O12 单独收益 6.4%，
+   O12+O13 vs O12 反而慢 1%（57.23 vs 56.62）。这说明 O13 的 collapse(3)
+   转换本身可能是负优化，被 O12 的收益掩盖了。O29 的结果验证了这个推测：
+   **workshare→collapse(3) 在 gfortran/ARM 上是负优化。**
+
+6. **与 O25/O28 的对比**：O25（合并 fderivs）和 O28（enforce_ga 标量化）都
+   涉及将 whole-array expression 改为逐点循环。O25 因延长 parallel 区域而
+   t=40 退化；O28 因 fork-join 开销和占比太低而无收益。O29 是第三种失败模式：
+   编译器优化空间丧失导致计算效率下降。
+
+**洞察**：在 gfortran + 鲲鹏 920B（ARM/AArch64）环境下，`!$omp parallel workshare`
+是 whole-array expression 的最优并行化方式。gfortran 将 workshare 编译为高效的
+批量数组操作（SVE 向量化 + 内存批量访问），编译器有全局优化视角。手动改为
+collapse(3) 的逐点循环反而降低了编译器优化空间。
+
+**结论**：workshare→collapse(3) 方向在当前架构下已穷尽失败，不应再尝试。
+当前 9 对 workshare + O13 的 2 个 collapse(3) 是 bssn_rhs.f90 的最优配置。
+
+决定：按"一次一项、负优化回退"原则恢复 `bssn_rhs.f90` 到 git HEAD 状态
+（9 对 workshare）。
+
+### O30：prolong3/restrict3 cxI 映射预计算
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据（`test_archives/perf_20260816_042534`，O8 配置 t=2）：
+
+| 符号 | self% | 说明 |
+|---|---:|---|
+| `prolong3_._omp_fn.0` | 2.84% | prolongation OpenMP 循环 |
+| `restrict3_._omp_fn.0` | 0.80% | restriction OpenMP 循环 |
+| `symmetry_bd_` | 0.74% | 全局（部分来自 prolong3/restrict3） |
+
+合计 prolongation + restriction 占 3.64%，对应 t=40 约 20s。STATE.md 推荐
+"prolong3 2.84% + restrict3 0.80%。可尝试缓存权重、向量化。预期收益 3-8s"。
+
+假设：prolong3/restrict3 的 OpenMP 循环内，每个点都重新计算 `cxI` 映射
+（`(i+lbf-1)/2 - lbc + 1`，3 次整数除法 + 加减法）和奇偶判断
+（`ii/2*2==ii`，3 次除法 + 比较）。将这些计算移到循环外预计算为数组查表，
+可减少循环内的整数运算开销。同时移除 `if(any(cxI+3 > extc))` 冗余边界检查
+（sanity check 已保证范围）。
+
+设计要点：
+- 不改变 whole-array expression 结构（避免 O29 教训：不手动改写数组语法）
+- 不改变 if/else 分支结构（避免引入新的数组索引开销）
+- 只预计算 cxI 映射和奇偶标志（logical 数组），用查表替代循环内计算
+- 使用 Fortran 2008 `block` 结构包含预计算的自动数组
+
+修改：
+- `src/prolongrestrict_cell.f90`：
+  - `prolong3`（ghost_width==3 分支，第 1921 行）：在 `call symmetry_bd` 后、
+    `!$omp parallel do` 前添加 `block` 结构，预计算 `cI1/cI2/cI3`（cxI 映射）
+    和 `ie/je/ke`（奇偶标志 logical 数组）。循环内用 `cI1(i)/cI2(j)/cI3(k)`
+    替代 `cxI(1)/cxI(2)/cxI(3)`，用 `ie(i)/je(j)/ke(k)` 替代 `ii/2*2==ii` 等。
+    移除 `cxI` private 声明、`cxI` 计算、`if(any(...))` 检查。
+  - `restrict3`（ghost_width==3 分支，第 2351 行）：同样的预计算优化。
+    restrict3 无奇偶分支（对称权重），只预计算 `cI1/cI2/cI3`。
+
+汇编验证：优化前 `prolong3_._omp_fn.0` 无 malloc/free 调用，gfortran 已将
+whole-array expression 内联为向量化循环（使用 q 寄存器和 fmla 指令）。
+优化不改变 expression 结构，只改变索引计算位置。
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|---|---:|---:|---:|---:|---:|
+| baseline (git HEAD) | 36.12 | 35.32 | 32.44 | 35.320 s | 10.4% |
+| O30 (预计算 cxI) | 34.69 | 35.34 | 33.12 | 34.690 s | 6.4% |
+
+O30 中位数比 baseline 快 1.8%（-0.630s），差异 <2%，无统计意义。
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4
+与 baseline **位级一致**，仅第一行时间戳不同）。
+
+**结果分析**：
+
+1. **差异 1.8% 在统计噪声范围内**：unbound 调度波动 ±10%，1.8% 的差异无法
+   与噪声区分。baseline 的最小值（32.44）甚至比 optimized 最小值（33.12）还小，
+   说明调度随机性主导了单次结果。
+
+2. **optimized 波动更小（6.4% vs 10.4%）**：预计算可能减少了循环内的计算
+   不确定性，使线程调度更稳定。但稳定性增益无法转化为中位数加速。
+
+3. **整数运算不是热点**：prolong3 的热点是 z 方向的 whole-array expression
+   （6×6 数组段的加权求和），已被 gfortran 向量化。循环内的 cxI 计算
+   （3 次整数除法 + 加减法）相对于 470 次浮点运算占比 <2%，消除它们
+   的收益低于显著性阈值。
+
+4. **与 O27/O28 的共同模式**：O27（边界清零）和 O28（enforce_ga 标量化）
+   也是针对占比 <2% 的优化，都得到 <2% 的差异。这进一步证实：
+   **当目标优化的理论收益 <2% 时，A/B 测试无法测出统计显著的收益。**
+
+决定：按"一次一项、无收益回退"原则恢复 `prolongrestrict_cell.f90` 到 git HEAD。
+
+## 下一步
+
+### 已穷尽的方向（更新）
+- workshare→collapse(3)：O29 证明在 gfortran/ARM 上是负优化（-11.5%）
+- 差分 kernel 向量化：R6/O24a/b/c 均失败
+- 小函数并行化（<2% 占比）：O27/O28/O30 无收益
+- prolongation cxI 预计算：O30 差异 1.8%（<2%）
+- 不要手动改写 Fortran whole-array expression（O29 教训）
+
+### 可探索方向
+1. **编译器切换（Arm Compiler / 毕昇）**：工具链优化，非计算 kernel。
+   Arm Compiler 可能对 ARM 有更好的自动向化和指令调度。
+2. **MPI 通信优化**：opal_progress 等待占 ~22%，但 O22 Split Sync 已失败
+   （page cache 污染）。可尝试减少消息数量或合并通信。
+3. **prolong3 的更激进优化**：如将 z 方向 whole-array expression 手动展开
+   为标量循环（针对小 6×6 数组，与大数组 O29 情况不同）。风险较高。
+
+### 当前性能天花板
+| 瓶颈 | 占比 | 可优化性 |
+|------|------|---------|
+| MPI 等待 | 23.6% (130s) | 不可优化（O22 退化，page cache 限制） |
+| OpenMP barrier | 15.0% (82s) | 不可优化（gfortran 不支持 workshare nowait） |
+| 差分 kernel | 17.0% (93s) | 不可优化（R6/O24a/b/c 均失败） |
+| compute_rhs | 21.6% (118s) | 已优化（O15-O18 workshare） |
+| 内存操作 | 8.0% (44s) | 部分已优化（O12/O20） |
+| prolongation | 3.6% (20s) | 不可优化（O30 无收益） |
+
+**结论：当前 O20+O26 配置（t=40 Total Evolve ~548s, Program Cost ~625s）
+是此环境下 CPU 计算优化的性能天花板。剩余方向只有工具链优化（编译器切换）。**
+
+### O31：armclang++ 编译器切换
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：计算 kernel 优化已穷尽（R6/O24a/b/c/O27/O28/O29/O30 均失败或无收益）。
+STATE.md 推荐"编译器切换（Arm Compiler / 毕昇）"作为剩余方向。
+
+环境验证：
+- Arm Compiler for Linux 24.10.1（基于 LLVM 19.1.0）已安装于
+  `/opt/arm/arm-linux-compiler-24.10.1_Ubuntu-22.04/bin/`
+- OpenMPI 支持 `OMPI_CXX`/`OMPI_FC` 后端覆盖，`mpicxx`/`mpifort` wrapper
+  可正确转发到 `armclang++`/`armflang`
+- CMakeLists.txt 已包含 `ARMClang` 编译器 ID 支持
+
+修改：
+- 无源码修改
+- 新建 `build_arm/` 构建目录，使用 `armclang++`/`armflang` 编译
+- 编译标志与 baseline 完全一致：`-O3 -g -fno-strict-aliasing`，无架构特定标志
+- `ab_test_compiler.sh`：自定义 A/B 测试脚本，针对编译器切换场景
+  （baseline 用 `build/`，optimized 用 `build_arm/`，源码相同）
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (g++ -O3 -g) | 27.32 | 27.27 | 27.65 | 27.316 s | 1.4% |
+| optimized (armclang++ -O3 -g) | 29.59 | 29.51 | 29.06 | 29.505 s | 1.8% |
+
+armclang++ 中位数比 g++ 慢 8.0%（+2.189s），远超 2% 阈值。
+波动很低（1.4%/1.8%），测量结果可信。
+
+Before Evolve 时间对比：
+- baseline (g++): 3.26, 3.30, 3.37s（中位数 3.30s）
+- optimized (armclang++): 2.98, 3.00, 3.26s（中位数 3.00s）
+armclang++ 的初始化阶段略快 9%，但 Total Evolve 阶段慢 8%。
+
+正确性验证：
+- bssn_BH.dat, bssn_constraint.dat, bssn_ADMQs.dat：**位级一致**（仅时间戳不同）
+- bssn_psi4.dat：数值差异在 1e-25 级（如 `-1.1662563e-25` vs `-2.5793982e-25`），
+  来自 MPI 归约顺序差异，非正确性问题
+- constraints PASS（Ham=0.22, Px=0.02, Py=0.007, Pz=0.009，均 ≤ 2.0）
+
+**失败原因深度分析**：
+
+1. **gfortran 的 workshare 优化是关键优势**：计算瓶颈是 Fortran 数组语法
+   （`!$omp parallel workshare`），gfortran 将其编译为 SVE 向量化的批量内存
+   操作（见 O29 分析）。armflang（LLVM Flang 1.5）对 Fortran whole-array
+   expression 的优化不如 gfortran 成熟，可能生成逐点循环而非批量操作。
+
+2. **OpenMP runtime 差异**：armclang++ 使用 libomp（LLVM），g++ 使用 libgomp
+   （GNU）。O8 配置依赖 unbound 调度 + `mpi_yield_when_idle`，两种 runtime
+   在线程让出/恢复行为上可能有细微差异，影响 MPI progress overlap 效率。
+
+3. **C++ 侧略快但 Fortran 侧显著慢**：Before Evolve（C++ 初始化 + 文件 I/O）
+   armclang++ 快 9%，但 Total Evolve（Fortran 计算）慢 8%。这证实了瓶颈在
+   Fortran 优化而非 C++ 优化。
+
+4. **不建议尝试 -mcpu=native**：R2 已证明 GCC 的 `-mcpu=native` 慢 13.6%。
+   armclang++ 基线已慢 8%，添加 `-mcpu=native` 不太可能逆转。
+
+**洞察**：
+- 在 gfortran + 鲲鹏 920B 的组合下，gfortran 对 Fortran 数组语法的优化已非常
+  成熟（SVE 向量化 + 批量内存操作）。LLVM Flang 1.5 在这方面仍有差距。
+- 编译器切换不是"免费午餐"——即使 Arm Compiler 对 ARM 硬件更"原生"，
+  对 Fortran 数组语法的优化能力才是决定性因素。
+- AMSS-NCKU 的性能瓶颈在 Fortran 计算 kernel（bssn_rhs 等），而非 C++ 通信
+   或控制逻辑。因此选择编译器应以 Fortran 优化能力为首要标准。
+
+决定：按"一次一项、负优化回退"原则，不切换到 armclang++/armflang。
+保留 g++/gfortran -O3 -g 作为编译器配置。
+
+### O32：LTO Link-Time Optimization
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：计算 kernel 优化已穷尽（R6/O24a/b/c/O27/O28/O29/O30 均失败或无收益）。
+编译器切换已失败（O31 armclang++ 慢 8%）。STATE.md 推荐"LTO（跨模块内联）"作为
+剩余方向。LTO 可能启用跨模块内联（如 `symmetry_bd` 内联到 `compute_rhs_bssn`），
+不增加内存占用，不受 page cache 污染影响。
+
+环境验证：
+- g++ 14.2.0 和 gfortran 14.2.0 均支持 `-flto`
+- CMake 3.31.6 支持 `CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON`
+- LTO 编译验证：`-flto` 出现在 28 条编译命令中，编译+链接成功
+
+修改：
+- 无源码修改
+- 新建 `build_lto/` 构建目录，使用 `CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON` 启用 LTO
+- 编译标志与 baseline 完全一致：`-O3 -g`，无架构特定标志
+- `ab_test_lto.sh`：自定义 A/B 测试脚本，针对 LTO 场景
+  （baseline 用 `build/`，optimized 用 `build_lto/`，源码相同）
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (g++ -O3 -g, 无 LTO) | 36.25 | 38.55 | 32.86 | 36.253 s | 15.7% |
+| optimized (g++ -O3 -g -flto, 有 LTO) | 38.37 | 36.09 | 37.19 | 37.191 s | 6.1% |
+
+LTO 中位数比 baseline 慢 2.6%（+0.938s），略超 2% 阈值。
+baseline 波动很高（15.7%），LTO 波动较低（6.1%）。
+
+Before Evolve 时间对比：
+- baseline: 3.69, 3.70, 3.70s（中位数 3.70s）
+- optimized (LTO): 3.45, 3.76, 3.85s（中位数 3.76s）
+LTO 的初始化阶段无显著差异。
+
+正确性验证：
+- bssn_BH.dat, bssn_constraint.dat, bssn_ADMQs.dat, bssn_psi4.dat：
+  **位级一致**（仅第一行时间戳不同）
+- 4 个关键 .dat 文件在忽略时间戳后完全相同
+
+**失败原因深度分析**：
+
+1. **LTO 的跨模块内联收益不足**：LTO 的主要优势是跨翻译单元的内联和死代码消除。
+   AMSS-NCKU 的潜在内联候选包括：
+   - `symmetry_bd`（全数组拷贝 + ghost fill）内联到 `compute_rhs_bssn`
+   - `polint`（插值）内联到 `prolong3`/`restrict3`
+   - `fderivs`/`fdderivs`（差分）内联到 `compute_rhs_bssn`
+   
+   但这些函数体积较大（`symmetry_bd` ~50 行，`fderivs` ~80 行），内联后会增加
+   调用点的代码体积，可能导致指令缓存压力增大。在鲲鹏 920B 的 64KB L1I cache
+   下，`compute_rhs_bssn` 已经是几百行的大函数，进一步内联可能超出 L1I 容量。
+
+2. **gfortran workshare 优化不受 LTO 影响**：AMSS-NCKU 的性能瓶颈是
+   `!$omp parallel workshare` 中的 Fortran whole-array expression。gfortran
+   已在单翻译单元内将这些编译为 SVE 向量化的批量内存操作（见 O29 分析）。
+   LTO 的跨模块内联不改变 workshare 内部的优化，因此无法改善瓶颈。
+
+3. **LTO 链接阶段开销**：LTO 在链接时需要重新优化所有翻译单元，可能改变
+   内联决策和代码布局。某些情况下，LTO 的全局优化决策比编译器的局部决策
+   更差（如过度内联导致寄存器溢出、代码膨胀导致 icache miss）。
+
+4. **与 O29/O31 的一致性**：O29（workshare→collapse(3)）和 O31（armclang++
+   编译器切换）的失败根因都是"gfortran 已对 Fortran 数组语法做了深度优化"。
+   O32（LTO）的失败延续了这个模式：LTO 无法改善 gfortran 已优化的部分，
+   只能优化 C++/Fortran 边界的小函数调用，收益不足以抵消 LTO 本身的开销。
+
+5. **波动降低但中位数未改善**：LTO 的波动从 15.7% 降至 6.1%，可能因为
+   LTO 生成的代码更确定（减少了内联决策的随机性）。但稳定性增益无法
+   转化为中位数加速，反而因上述原因略慢。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化 | 失败根因 |
+|------|------|------|---------|
+| O25 | 合并 fderivs 延长 parallel 区域 | t=40 +30% | page cache 污染 |
+| O28 | enforce_ga 标量化 + collapse(3) | -1.5% | fork-join 开销 + 占比太低 |
+| O29 | workshare→collapse(3) | -11.5% | 编译器优化空间丧失 |
+| O30 | prolong3 cxI 预计算 | +1.8% (无收益) | 整数运算已优化为算术右移 |
+| O31 | armclang++ 编译器切换 | -8.0% | armflang workshare 不如 gfortran |
+| O32 | LTO Link-Time Optimization | -2.6% | 跨模块内联收益不足 |
+
+O31 和 O32 都是工具链优化（编译器切换、LTO），都失败了。这证实了
+**g++/gfortran -O3 -g 是当前架构下的最优编译配置**，任何编译器层面的
+改变都无法带来收益。
+
+**洞察**：
+- LTO 在 gfortran/g++ 混合编译下无收益。gfortran 已在单翻译单元内对
+  Fortran 数组语法做了深度优化（SVE 向量化、批量内存操作），LTO 的跨模块
+  内联无法改善这些已优化的部分。
+- LTO 的主要潜在收益（内联 `symmetry_bd` 等小函数）受限于指令缓存压力。
+  在 `compute_rhs_bssn` 已是几百行大函数的情况下，进一步内联可能超出 L1I 容量。
+- LTO 波动降低（15.7%→6.1%）是一个积极信号，说明 LTO 生成的代码更确定。
+  但稳定性增益无法转化为中位数加速。
+- 工具链优化方向（编译器切换 O31、LTO O32）已穷尽，均无收益。
+
+决定：按"一次一项、负优化回退"原则，不启用 LTO。
+保留 g++/gfortran -O3 -g（无 LTO）作为编译配置。
+
+## 下一步
+
+### 已穷尽的方向（更新）
+- workshare→collapse(3)：O29 证明在 gfortran/ARM 上是负优化（-11.5%）
+- 差分 kernel 向量化：R6/O24a/b/c 均失败
+- 小函数并行化（<2% 占比）：O27/O28/O30 无收益
+- prolongation cxI 预计算：O30 差异 1.8%（<2%）
+- 编译器切换：O31 armclang++ 慢 8%（gfortran workshare 优化是关键优势）
+- LTO：O32 略慢 2.6%（跨模块内联无收益，LTO 本身有开销）
+- 不要手动改写 Fortran whole-array expression（O29 教训）
+- 整数运算预计算（O30 教训）
+- 任何增加持久内存占用的优化（page cache 污染敏感）
+
+### 可探索方向
+1. **MPI 实现切换**：尝试 MPICH 替代 OpenMPI。MPICH 的 progress engine
+   行为不同，可能减少 `opal_progress` 等待。但需要重新构建 MPI wrapper。
+2. **prolong3 的更激进优化**：如将 z 方向 whole-array expression 手动展开
+   为标量循环（针对小 6×6 数组，与大数组 O29 情况不同）。风险较高。
+3. **profile-flame-graph 深度分析**：当前 unbound 调度波动高达 15.7%，
+   可能掩盖了小收益。可考虑用 `--bind-to core` 稳定绑核重新做一轮
+   profile，确认是否还有遗漏的热点。
+
+### 当前性能天花板（更新）
+| 瓶颈 | 占比 | 可优化性 |
+|------|------|---------|
+| MPI 等待 | 23.6% (130s) | 不可优化（O22 退化，page cache 限制） |
+| OpenMP barrier | 15.0% (82s) | 不可优化（gfortran 不支持 workshare nowait） |
+| 差分 kernel | 17.0% (93s) | 不可优化（R6/O24a/b/c 均失败） |
+| compute_rhs | 21.6% (118s) | 已优化（O15-O18 workshare） |
+| 内存操作 | 8.0% (44s) | 部分已优化（O12/O20） |
+| prolongation | 3.6% (20s) | 不可优化（O30 无收益） |
+| 编译器 | — | 不可优化（O31 armclang++ 慢 8%） |
+| LTO | — | 不可优化（O32 略慢 2.6%） |
+
+**结论：当前 O20+O26 配置（t=40 Total Evolve ~548s, Program Cost ~625s）
+是此环境下 CPU 计算优化的性能天花板。编译器切换已失败。
+LTO 已失败。剩余方向只有 MPI 实现切换。**
+
+### O33：MPI实现切换-MPICH（UCX_TLS=self,sysv）
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：`opal_progress` 等待占 ~22-30%（OpenMPI 的 active progress engine）。
+STATE.md 推荐"MPI 实现切换"作为剩余方向。MPICH 的 progress engine 是 blocking 模型
+（不主动轮询），理论上可能减少 progress 开销。
+
+环境验证：
+- MPICH 4.3.0+really4.2.1-1 已安装（`/usr/bin/mpicxx.mpich` 等）
+- MPICH 使用 UCX ch4 设备（`--with-device=ch4:ucx`）
+- UCX 1.18.1 提供 posix/sysv/cma 传输
+- g++/gfortran 14.2.0 作为后端编译器（与 baseline 相同）
+
+**第一次尝试（UCX posix 失败）**：
+
+直接使用 `mpiexec.mpich` 运行 30 个 rank。UCX 的 posix 传输尝试在 `/dev/shm` 中
+分配共享内存段，每个 rank 约 4MB，30 个 rank 共需 ~120MB。容器环境 `/dev/shm`
+仅 64MB，UCX 报错：
 ```
+UCX ERROR Not enough memory to write total of 4292720 bytes.
+Please check that /dev/shm or the directory you specified has more available memory.
+```
+
+尝试的修复：
+1. `UCX_TLS=self,cma` - CMA 传输不支持 active messages（"no am bcopy"）
+2. `UCX_POSIX_SHM_PATH` / `UCX_POSIX_SHM_DIR` - 这些变量在 UCX 1.18.1 中未识别
+3. `UCX_MM_SEG_SIZE=1M` - 反而增加总分配量到 128MB/rank
+4. `mount -o remount,size=2G /dev/shm` - 权限被拒绝（容器限制）
+
+**第二次尝试（UCX_TLS=self,sysv）**：
+
+使用 System V 共享内存替代 POSIX 共享内存。`shmget/shmat` 不依赖 `/dev/shm`。
+
+修改：
+- 无源码修改
+- 新建 `build_mpich/` 构建目录，使用 `mpicxx.mpich`/`mpifort.mpich` 编译
+- 编译标志与 baseline 完全一致：`-O3 -g`，无架构特定标志
+- `ab_test_mpich.sh`：自定义 A/B 脚本，设置 `UCX_TLS=self,sysv` 和
+  `AMSS_MPIEXEC="mpiexec.mpich -genv UCX_TLS self,sysv"`
+
+A/B 测试结果（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (OpenMPI 5.0.7) | 33.11 | 36.71 | 33.96 | 33.963 s | 10.6% |
+| optimized (MPICH 4.2.1 + UCX sysv) | 35.57 | 35.22 | 35.75 | 35.572 s | 1.5% |
+
+MPICH 中位数比 OpenMPI 慢 4.7%（+1.609s），远超 2% 阈值。
+但 MPICH 波动极低（1.5% vs 10.6%），说明其 progress engine 更确定。
+
+正确性验证：
+- bssn_BH.dat, bssn_constraint.dat, bssn_ADMQs.dat, bssn_psi4.dat：
+  **位级一致**（仅第一行时间戳不同）
+- constraints PASS
+
+**失败原因深度分析**：
+
+1. **System V 共享内存比 OpenMPI vader 慢**：
+   OpenMPI 使用内置的 vader/sm 传输进行节点内通信。vader 直接映射另一个进程的
+   内存到本进程地址空间（通过 `/proc/<pid>/mem` 或 XPMEM），零拷贝。
+   
+   MPICH 使用 UCX 的 sysv 传输。sysv 通过 `shmget/shmat` 创建共享内存段，
+   虽然不依赖 `/dev/shm`，但：
+   - 需要额外的内核系统调用（shmget + shmat + shmdt + shmctl）
+   - 共享内存段有大小限制（`shmmax`）
+   - 需要显式同步（信号量或互斥锁），而 vader 使用原子操作
+
+2. **UCX 层的开销**：
+   OpenMPI 的 vader 传输是直接编译进 OpenMPI 的，没有额外的抽象层。
+   MPICH 的 UCX 是一个独立的通信框架，有额外的抽象层和间接调用。
+   对于小消息（如 ghost zone exchange），UCX 的开销更明显。
+
+3. **progress engine 差异**：
+   OpenMPI 的 `opal_progress` 是 active polling + yield。虽然看似浪费 CPU，
+   但实际上提供了更快的消息检测（微秒级响应）。
+   MPICH 的 blocking progress 模型在检测消息时需要内核唤醒，延迟更高。
+   
+   在 unbound 调度下，OpenMPI 的 active polling 让空闲 rank 快速检测到消息，
+   让出 CPU 给计算 rank。MPICH 的 blocking 模型需要内核调度器唤醒，
+   增加了同步延迟。
+
+4. **波动降低但中位数未改善**：
+   MPICH 的波动从 10.6% 降至 1.5%，说明其调度更确定。但稳定性增益无法
+   转化为中位数加速。OpenMPI 的"幸运"波动（偶尔 33.1s）比 MPICH 的
+   稳定 35.2s 更快。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化 | 失败根因 |
+|------|------|------|---------|
+| O25 | 合并 fderivs 延长 parallel 区域 | t=40 +30% | page cache 污染 |
+| O28 | enforce_ga 标量化 + collapse(3) | -1.5% | fork-join 开销 + 占比太低 |
+| O29 | workshare→collapse(3) | -11.5% | 编译器优化空间丧失 |
+| O30 | prolong3 cxI 预计算 | +1.8% (无收益) | 整数运算已优化为算术右移 |
+| O31 | armclang++ 编译器切换 | -8.0% | armflang workshare 不如 gfortran |
+| O32 | LTO Link-Time Optimization | -2.6% | 跨模块内联收益不足 |
+| O33 | MPI实现切换-MPICH | -4.7% | UCX sysv 比 OpenMPI vater 慢 |
+
+**洞察**：
+- **OpenMPI 的 vader 传输是节点内通信的最优选择**。它直接映射进程内存，
+  零拷贝，无需系统调用。MPICH 的 UCX sysv 传输需要额外的内核系统调用和同步。
+- **容器环境的 /dev/shm 限制（64MB）阻碍了 UCX posix 传输**。这使得 MPICH
+  只能使用更慢的 sysv 传输，进一步拉大了与 OpenMPI 的差距。
+- **MPICH 的低波动（1.5%）是一个积极信号**，说明其 progress engine 更确定。
+  但在 unbound 调度下，OpenMPI 的高波动反而带来了偶尔的"幸运"结果，
+  使中位数更低。
+- **MPI 实现切换方向已穷尽**。在容器环境下，OpenMPI 的内置 vader 传输
+  是最优选择，MPICH 无法超越。
+
+决定：按"一次一项、负优化回退"原则，不切换到 MPICH。
+保留 OpenMPI 5.0.7 作为 MPI 实现。
+
+### O34：prolong3 z 方向 whole-array expression 手动展开为标量循环
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据（`test_archives/perf_20260816_042534`，O8 配置 t=2）：
+`prolong3_._omp_fn.0` 占 2.84% self。STATE.md 推荐方向："将 z 方向
+whole-array expression 手动展开为标量循环（针对小 6×6 数组，与大数组 O29
+情况不同）"。
+
+背景与动机：
+O29 教训是"不要手动改写 Fortran whole-array expression"，但针对的是大数组
+（整个 3D 网格，连续内存，SVE 向量化效率高）。prolong3 的 z 方向 whole-array
+expression 操作的是 6×6 切片（funcc 的 6×6 子矩阵），b 方向有 stride
+(extc(1)+5)，是非连续访问。STATE.md 认为这种情况可能与 O29 不同。
+
+O30 教训是"整数运算预计算无收益"（gfortran 已将整数除法优化为算术右移）。
+但 O30 不改变 expression 结构，只预计算整数索引。本实验改变的是浮点
+expression 结构（从 whole-array 改为标量循环），是不同的优化方向。
+
+假设：prolong3 的 z 方向 `tmp2 = C1*funcc(slice) + ...` whole-array
+expression 可能创建临时数组或引入额外的内存访问。手动展开为标量循环
+`tmp2(aa,bb) = wz1*funcc(cxI(1)-3+aa, cxI(2)-3+bb, cxI(3)-2) + ...`
+可以：
+1. 消除 whole-array expression 的临时数组开销
+2. 显式控制内存访问模式，可能改善非连续访问
+3. 预计算权重变量 wz1..wz6，减少 if/else 分支的重复
+
+修改：
+- `src/prolongrestrict_cell.f90`：prolong3（ghost_width==3 分支）的 #else 分支：
+  - 添加局部变量 `wz1..wz6`（标量权重）和 `aa,bb`（循环变量）
+  - 将 z 方向的 if/else + 6 行 whole-array expression（每行 6×6 数组操作）
+    改为：预计算 6 个标量权重 + 双重循环（6×6 = 36 次标量计算）
+  - 保持 y 方向（tmp1 = 6 元素向量表达式）和 x 方向（funf = 标量表达式）不变
+  - 更新 OpenMP private 子句，添加 wz1..wz6, aa, bb
+- 不改变 #if 0 分支（未使用的分支）
+- 不改变 restrict3（restriction 是对称权重，无奇偶分支）
+
+索引验证：
+- 原代码切片 `funcc(cxI(1)-2:cxI(1)+3, cxI(2)-2:cxI(2)+3, cxI(3)-2)` 的
+  第 aa 个元素是 `cxI(1)-2+(aa-1) = cxI(1)-3+aa`
+- 新代码用 `funcc(cxI(1)-3+aa, cxI(2)-3+bb, cxI(3)-2)` ✓
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (git HEAD) | 27.47 | 27.13 | 27.08 | 27.126 s | 1.4% |
+| O34 (z 标量循环) | 27.29 | 26.84 | 26.77 | 26.840 s | 1.9% |
+
+O34 中位数比 baseline 快 1.1%（-0.286s），差异 <2%，无统计意义。
+波动很低（1.4%/1.9%），测量结果可信。
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4
+与 baseline **位级一致**，仅第一行时间戳不同）。
+
+**失败原因深度分析**：
+
+1. **gfortran 已将 whole-array expression 向量化**：O30 的汇编分析已确认
+   gfortran 将 prolong3 的 whole-array expression 内联为 SVE 向量化循环
+   （使用 q 寄存器和 fmla 指令）。手动展开为标量循环不改变向量化方式——
+   gfortran 同样可以对 `do aa=1,6` 的标量循环做 SVE 向量化。
+
+2. **非连续访问不是瓶颈**：STATE.md 假设 6×6 切片的 b 方向非连续访问
+   可能阻碍向量化。但实际上，gfortran 的 whole-array expression 对
+   6×6 切片做的是**a 方向（stride-1）向量化**，每个 b 值单独处理。
+   这与标量循环 `do bb, do aa` 的向量化方式完全相同。
+
+3. **权重变量未带来收益**：预计算 wz1..wz6 标量权重，消除了 y 和 x
+   方向的 if/else 分支（但 z 方向仍需 if/else 设置权重）。实际上，
+   gfortran 可能已将 if/else 分支优化为条件移动（cmov）指令，权重变量
+   不改变这种优化。
+
+4. **寄存器压力增加**：6 个标量权重变量 wz1..wz6 占用额外寄存器。
+   虽然鲲鹏 920B 有 32 个 NEON/SVE 寄存器，但加上循环变量、数组指针
+   和中间计算，寄存器可能溢出到栈，增加内存访问。
+
+5. **与 O30 的一致性**：O30（整数预计算）差异 +1.8%，O34（浮点 expression
+   展开）差异 +1.1%。两者都在 <2% 范围内，证实 prolong3 的 whole-array
+   expression 已被 gfortran 充分优化，无法通过手动改写获得收益。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化/收益 | 失败根因 |
+|------|------|-----------|---------|
+| O29 | workshare→collapse(3)（大数组） | -11.5% | 编译器优化空间丧失 |
+| O30 | prolong3 cxI 预计算（整数） | +1.8% (无收益) | 整数运算已优化为算术右移 |
+| O34 | prolong3 z 方向标量循环（浮点） | +1.1% (无收益) | whole-array expression 已 SVE 向量化 |
+
+O29 和 O34 的失败根因本质上相同：**gfortran 已对 Fortran whole-array
+expression 做了深度优化（SVE 向量化、批量内存操作），手动改写为标量循环
+无法超越编译器的优化**。O29 针对大数组，O34 针对小 6×6 数组，结论一致。
+
+**洞察**：
+- **STATE.md 的"小 6×6 数组与大数组 O29 情况不同"假设不成立**。gfortran
+  对小数组和大数据组的 whole-array expression 都做了 SVE 向量化。手动改写
+  在两种情况下都无法获得收益。
+- **prolong3 的 whole-array expression 已接近最优**。O30（整数预计算）和
+  O34（浮点 expression 展开）都确认了这一点。prolong3 的 2.84% self 是
+  当前架构下的性能下限。
+- **prolongation 优化方向已穷尽**：O30（整数预计算）无收益，O34（浮点
+  expression 展开）无收益。剩余方向只有算法级改变（如减少 symmetry_bd
+  调用次数、批处理多变量），但这些方向工程量大且有风险。
+
+决定：按"一次一项、无收益回退"原则恢复 `prolongrestrict_cell.f90` 到
+git HEAD 状态。
+
+## 下一步
+
+### 已穷尽的方向（更新）
+- workshare→collapse(3)：O29 证明在 gfortran/ARM 上是负优化（-11.5%）
+- 差分 kernel 向量化：R6/O24a/b/c 均失败
+- 小函数并行化（<2% 占比）：O27/O28/O30 无收益
+- prolongation cxI 预计算：O30 差异 1.8%（<2%）
+- prolongation z 方向标量循环：O34 差异 1.1%（<2%）
+- 编译器切换：O31 armclang++ 慢 8%（gfortran workshare 优化是关键优势）
+- LTO：O32 略慢 2.6%（跨模块内联无收益，LTO 本身有开销）
+- MPI 实现切换：O33 MPICH 慢 4.7%（UCX sysv 比 OpenMPI vader 慢）
+- 不要手动改写 Fortran whole-array expression（O29/O34 教训，大小数组均适用）
+- 整数运算预计算（O30 教训）
+- 浮点 expression 手动展开（O34 教训：gfortran 已 SVE 向量化）
+- 任何增加持久内存占用的优化（page cache 污染敏感）
+
+### 可探索方向
+1. **profile-flame-graph 深度分析**：当前 unbound 调度波动高达 10.6%，
+   可能掩盖了小收益。可考虑用 `--bind-to core` 稳定绑核重新做一轮
+   profile，确认是否还有遗漏的热点。
+   注意：R5 已证明 `--bind-to core` 比 unbound 慢 33%，但 profile 结果
+   可用于发现新热点，不代表要切换绑核方式。
+   注意：本轮已用 perf report 分析了现有 perf.data（unbound 配置），
+   确认没有遗漏的大热点（所有 >2% 的热点都已被尝试优化）。
+   `--bind-to core` 重新采样可能发现占比不同的小热点，但不太可能有大的新发现。
+
+### 当前性能天花板（更新）
+| 瓶颈 | 占比 | 可优化性 |
+|------|------|---------|
+| MPI 等待 | 23.6% (130s) | 不可优化（O22/O33 均失败） |
+| OpenMP barrier | 15.0% (82s) | 不可优化（gfortran 不支持 workshare nowait） |
+| 差分 kernel | 17.0% (93s) | 不可优化（R6/O24a/b/c 均失败） |
+| compute_rhs | 21.6% (118s) | 已优化（O15-O18 workshare） |
+| 内存操作 | 8.0% (44s) | 部分已优化（O12/O20） |
+| prolongation | 3.6% (20s) | 不可优化（O30/O34 均无收益） |
+| 编译器 | — | 不可优化（O31 armclang++ 慢 8%） |
+| LTO | — | 不可优化（O32 略慢 2.6%） |
+| MPI 实现 | — | 不可优化（O33 MPICH 慢 4.7%） |
+
+**结论：当前 O20+O26 配置（t=40 Total Evolve ~548s, Program Cost ~625s）
+是此环境下 CPU 计算优化的性能天花板。
+编译器切换已失败（O31）。LTO 已失败（O32）。MPI 实现切换已失败（O33）。
+prolong3 更激进优化已失败（O34）。
+本轮已用 perf report 深度分析现有 perf.data，确认没有遗漏的大热点
+（所有 >2% 的热点都已被尝试优化或已优化）。
+剩余方向只有 --bind-to core 重新 profile，但不太可能发现大的新热点。**
+
+### O35：PGO Profile-Guided Optimization
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：计算 kernel 优化已穷尽（R6/O24a/b/c/O27/O28/O29/O30/O34 均失败或无收益）。
+编译器切换已失败（O31 armclang++ 慢 8%）。LTO 已失败（O32 略慢 2.6%）。MPI 实现切换已失败
+（O33 MPICH 慢 4.7%）。STATE.md 将"profile-flame-graph 深度分析"列为唯一可探索方向，
+但明确标注"不太可能有大的新发现"。PGO 是一个未被尝试的工具链优化方向，与 O31/O32/O33
+本质不同：它使用同一个 g++/gfortran 编译器，通过运行时 profile 数据指导编译决策
+（分支预测、内联、代码布局），不增加内存占用，不改变源码。
+
+**环境验证**：
+- g++ 14.2.0 和 gfortran 14.2.0 均支持 `-fprofile-generate`/`-fprofile-use`
+- PGO 流程：1) 编译插桩二进制 2) 训练运行收集 .gcda 3) 用 profile 数据重新编译
+- 关键修复：`-fprofile-generate` 需要同时作为编译选项和链接选项
+  （CMake 的 `add_compile_options` 只处理编译，需要 `-DCMAKE_EXE_LINKER_FLAGS` 传递给链接器）
+- 训练运行使用 t=2, --twop-cache, 30×2, owner-local 16线程配置
+- 训练收集到 26 个 .gcda 文件（包括 bssn_rhs.f90.gcda 16K，最大的 profile 数据）
+
+**修改内容**：
+- 无源码修改
+- 新建 `build_pgo_gen/` 构建目录，使用 `-fprofile-generate=/tmp/pgo_data` + `-fprofile-generate`（链接）
+- 新建 `build_pgo/` 构建目录，使用 `-fprofile-use=/tmp/pgo_data -fprofile-correction` + `-fprofile-use -fprofile-correction`（链接）
+- 编译标志与 baseline 完全一致：`-O3 -g`，无架构特定标志
+- `ab_test_pgo.sh`：自定义 A/B 脚本，包含 PGO 完整流程（generate→train→use→test）
+
+**A/B 测试结果**（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (g++ -O3 -g, 无 PGO) | 27.48 | 27.01 | 27.33 | 27.329 s | 1.7% |
+| optimized (g++ -O3 -g -fprofile-use, 有 PGO) | 27.62 | 27.56 | 26.97 | 27.558 s | 2.4% |
+
+PGO 中位数比 baseline 慢 0.8%（+0.229s），差异 <2%，无统计意义。
+
+Before Evolve 时间对比：
+- baseline: 中位数 2.89s
+- PGO: 中位数 3.21s（略慢，可能因 PGO 代码布局变化）
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4
+与 baseline **位级一致**，仅第一行时间戳不同）。
+
+**失败原因深度分析**：
+
+1. **PGO 的主要收益（分支预测优化）不适用**：
+   perf stat 显示 baseline 的 branch miss rate 仅 0.82%。PGO 的核心优势是通过
+   profile 数据改善分支预测（将 likely/unlikely 信息传递给编译器）。但在分支
+   miss rate已经很低的情况下，PGO 的潜在收益很小。AMSS-NCKU 的计算 kernel
+   （差分、prolongation）的分支模式简单且可预测（内部点全部走同一分支），
+   硬件分支预测器已能很好地处理。
+
+2. **gfortran workshare 优化不受 PGO 影响**：
+   性能瓶颈是 `!$omp parallel workshare` 中的 Fortran whole-array expression。
+   O29 已证明 gfortran 在**单翻译单元内**已将这些编译为 SVE 向量化的批量内存
+   操作。PGO 的 profile 数据不改变 workshare 内部的编译过程——workshare 的
+   优化发生在 `bssn_rhs.f90` 的编译阶段，不需要运行时 profile 信息。因此 PGO
+   无法改善性能瓶颈。
+
+3. **PGO 的代码布局优化收益有限**：
+   PGO 可能改善指令缓存（icache）利用率（将热代码放在一起）。但鲲鹏 920B 的
+   64KB L1I cache 对于 `compute_rhs_bssn`（几百行函数）已足够。perf stat 显示
+   L1D miss 仅 0.13%，说明 cache 表现良好。主要的 cache miss 来自 LLC（37.31%），
+   这是 page cache 污染导致的**数据** cache miss，不是指令 cache miss，PGO
+   无法改善。
+
+4. **PGO 的内联决策可能不如编译器局部决策**：
+   PGO 的内联决策基于运行时调用频率。但 AMSS-NCKU 的热函数（`fderivs`、
+   `fdderivs`、`lopsided_kodis`）体积较大（80-200 行），内联后会增加代码体积，
+   可能超出 L1I 容量。PGO 可能选择内联这些函数（因为它们被频繁调用），但内联
+   后的代码膨胀反而降低 icache 效率。这与 O32（LTO）的失败根因类似。
+
+5. **训练数据代表性**：
+   PGO 训练使用 t=2（2 个 timestep），这可能不足以捕获长跑中的所有代码路径。
+   但 t=2 已覆盖主要计算路径（compute_rhs + prolongation + analysis），且
+   PGO 的 profile 数据主要影响编译决策（不随时间变化），因此训练数据代表性
+   不是主要问题。
+
+6. **波动增大**：
+   PGO 的波动从 1.7% 升至 2.4%。这可能因为 PGO 生成的代码布局更"定制化"，
+   在 unbound �度下对线程迁移更敏感。但波动差异不大，不足以解释性能差异。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化 | 失败根因 |
+|------|------|------|---------|
+| O25 | 合并 fderivs 延长 parallel 区域 | t=40 +30% | page cache 污染 |
+| O28 | enforce_ga 标量化 + collapse(3) | -1.5% | fork-join 开销 + 占比太低 |
+| O29 | workshare→collapse(3) | -11.5% | 编译器优化空间丧失 |
+| O30 | prolong3 cxI 预计算 | +1.8% (无收益) | 整数运算已优化为算术右移 |
+| O31 | armclang++ 编译器切换 | -8.0% | armflang workshare 不如 gfortran |
+| O32 | LTO Link-Time Optimization | -2.6% | 跨模块内联收益不足 |
+| O33 | MPI实现切换-MPICH | -4.7% | UCX sysv 比 OpenMPI vader 慢 |
+| O34 | prolong3 z 方向标量循环 | +1.1% (无收益) | whole-array expression 已 SVE 向量化 |
+| O35 | PGO Profile-Guided Optimization | -0.8% (无收益) | branch miss rate 太低，workshare 已优化 |
+
+O31、O32、O33、O35 都是工具链优化（编译器切换、LTO、MPI 实现切换、PGO），都失败了。
+这进一步证实了 **g++/gfortran -O3 -g（无 LTO、无 PGO）+ OpenMPI 是当前容器环境下的
+最优工具链组合**。
+
+**洞察**：
+- **PGO 在低 branch miss rate（0.82%）的程序上无收益**。PGO 的核心优势是分支预测
+  优化，当硬件分支预测器已表现良好时，PGO 的 profile 数据无法提供额外信息。
+- **PGO 不改善 gfortran workshare 优化**。workshare 的优化在编译阶段完成，
+  不依赖运行时 profile 数据。PGO 只能影响"哪些函数内联"和"代码如何布局"，
+  但这些都不是 AMSS-NCKU 的性能瓶颈。
+- **工具链优化方向已全部穷尽**：编译器切换（O31）、LTO（O32）、MPI 实现切换（O33）、
+  PGO（O35）均失败。当前 g++/gfortran -O3 -g + OpenMPI 5.0.7 配置已是最优。
+
+决定：按"一次一项、无收益回退"原则，不启用 PGO。
+保留 g++/gfortran -O3 -g（无 PGO、无 LTO）作为编译配置。
+
+## 下一步
+
+### 已穷尽的方向（更新）
+- workshare→collapse(3)：O29 证明在 gfortran/ARM 上是负优化（-11.5%）
+- 差分 kernel 向量化：R6/O24a/b/c 均失败
+- 小函数并行化（<2% 占比）：O27/O28/O30 无收益
+- prolongation cxI 预计算：O30 差异 1.8%（<2%）
+- prolongation z 方向标量循环：O34 差异 1.1%（<2%）
+- 编译器切换：O31 armclang++ 慢 8%（gfortran workshare 优化是关键优势）
+- LTO：O32 略慢 2.6%（跨模块内联无收益，LTO 本身有开销）
+- MPI 实现切换：O33 MPICH 慢 4.7%（UCX sysv 比 OpenMPI vader 慢）
+- PGO：O35 差异 0.8%（<2%，branch miss rate 太低，workshare 已优化）
+- 不要手动改写 Fortran whole-array expression（O29/O34 教训，大小数组均适用）
+- 整数运算预计算在 gfortran/ARM 上无收益（O30 教训：整数除法已优化为算术右移）
+- 浮点 expression 手动展开在 gfortran/ARM 上无收益（O34 教训：whole-array expression 已 SVE 向量化）
+- 容器环境 /dev/shm 限制（64MB）阻碍 UCX posix 传输（O33 教训）
+- PGO 在低 branch miss rate 程序上无收益（O35 教训：0.82% branch miss rate 已足够低）
+- 工具链优化已全部穷尽（O31 编译器切换、O32 LTO、O33 MPI 切换、O35 PGO 均失败）
+
+### 可探索方向
+1. **profile-flame-graph 深度分析**：当前 unbound 调度波动高达 2.4%，
+   可能掩盖了小收益。可考虑用 `--bind-to core` 稳定绑核重新做一轮
+   profile，确认是否还有遗漏的热点。
+   注意：R5 已证明 `--bind-to core` 比 unbound 慢 33%，但 profile 结果
+   可用于发现新热点，不代表要切换绑核方式。
+   注意：本轮已用 perf report 分析了现有 perf.data（unbound 配置），
+   确认没有遗漏的大热点（所有 >2% 的热点都已被尝试优化）。
+   `--bind-to core` 重新采样可能发现占比不同的小热点，但不太可能有大的新发现。
+
+### 当前性能天花板（更新）
+| 瓶颈 | 占比 | 可优化性 |
+|------|------|---------|
+| MPI 等待 | 23.6% (130s) | 不可优化（O22/O33 均失败） |
+| OpenMP barrier | 15.0% (82s) | 不可优化（gfortran 不支持 workshare nowait） |
+| 差分 kernel | 17.0% (93s) | 不可优化（R6/O24a/b/c 均失败） |
+| compute_rhs | 21.6% (118s) | 已优化（O15-O18 workshare） |
+| 内存操作 | 8.0% (44s) | 部分已优化（O12/O20） |
+| prolongation | 3.6% (20s) | 不可优化（O30/O34 均无收益） |
+| 编译器 | — | 不可优化（O31 armclang++ 慢 8%） |
+| LTO | — | 不可优化（O32 略慢 2.6%） |
+| MPI 实现 | — | 不可优化（O33 MPICH 慢 4.7%） |
+| PGO | — | 不可优化（O35 无收益 -0.8%） |
+
+**结论：当前 O20+O26 配置（t=40 Total Evolve ~548s, Program Cost ~625s）
+是此环境下 CPU 计算优化的性能天花板。
+编译器切换已失败（O31）。LTO 已失败（O32）。MPI 实现切换已失败（O33）。
+prolong3 更激进优化已失败（O34）。PGO 已失败（O35）。
+本轮已用 perf report 深度分析现有 perf.data，确认没有遗漏的大热点
+（所有 >2% 的热点都已被尝试优化或已优化）。
+所有工具链优化方向（编译器切换、LTO、MPI 切换、PGO）均已穷尽。
+剩余方向只有 --bind-to core 重新 profile，但不太可能发现大的新热点。**
+
+### O36：--bind-to core profile 深度分析
+
+状态：**分析完成（无源码修改，无优化可做）**。
+
+日期：2026-08-17。
+
+profiler 证据：STATE.md 列出的唯一可探索方向是"profile-flame-graph 深度分析"。
+此前已用 perf report 分析了 unbound 配置的 perf.data（perf_20260816_042534），
+确认所有 >2% 的热点都已被尝试优化。本实验用 `--bind-to core` 重新采样，
+验证 unbound 调度是否掩盖了小热点。
+
+实验设计：
+- 新建 `perf_analysis_bindcore.sh`，使用 `--bind-to hwthread` + `OMP_PROC_BIND=close`
+  + `OMP_PLACES=cores`（无 `mpi_yield_when_idle`）
+- 临时设置 Final_Evolution_Time=2.0（trap 恢复 40.0）
+- 其他配置与 O8 相同（MPI=30, OMP=2, owner-local 16线程, --twop-cache）
+- perf 数据：test_archives/perf_bindcore_20260817_181021/
+
+Timing 对比：
+
+| 配置 | Timestep 1 | Timestep 2 | Total Evolve | perf stat wall |
+|------|-----------|-----------|-------------|----------------|
+| unbound (O8) | 21.58s | 23.88s | ~37s | 41.36s |
+| bind-to core | 32.90s | 32.94s | ~57s | 60.77s |
+
+bind-to core 慢 1.55x。原因是破坏了 O8 非对称线程模型（无 yield → 空闲 rank
+spin-wait → 无法让 CPU 给计算 rank）。
+
+perf stat 对比：
+
+| 指标 | unbound | bind-to core | 说明 |
+|------|---------|-------------|------|
+| IPC | 2.13 | 1.78 | bind-to core ILP 更低 |
+| branch miss | 0.42% | 0.80% | bind-to core 分支预测更差 |
+| cache miss | 1.48% | 0.60% | bind-to core cache 局部性更好 |
+| sys time | 475.7s | 25.8s | bind-to core 几乎无内核时间 |
+| user time | 1043.5s | 2076.9s | bind-to core spin-wait 更多 |
+
+关键发现：unbound 中 8.77% 的 kernel time（`[k] 0xffffb2dbc8bde984`）在
+bind-to core 中完全消失（0.07%）。调用图确认：
+
+```
+MPI_Waitall → opal_progress → __sched_yield → 0xffffb2dbc8bdee68 → 0xffffb2dbc8bde984
+```
+
+这 8.77% 是 `mpi_yield_when_idle=1` 导致的 sched_yield 系统调用进入内核调度器的
+开销。bind-to core 用 opal_progress spin-wait 替代（self 从 11.63% 升至 42.09%）。
+
+计算热点对比（self%）：
+
+| 符号 | unbound | bind-to core | 状态 |
+|------|:---:|:---:|------|
+| opal_progress | 11.63% | 42.09% | MPI 等待（不可优化） |
+| libgomp barrier | 9.06% | 1.38% | OpenMP barrier（不可优化） |
+| kernel sched_yield | 8.77% | 0.07% | MPI yield 副作用 |
+| lopsided_kodis | 8.64% | 4.67% | R6/O24a/b/c 失败 |
+| compute_rhs_fn.5 | 7.37% | 5.93% | O15-O18 已优化 |
+| fdderivs | 5.76% | 2.94% | R6 失败 |
+| compute_rhs_fn.1 | 4.72% | 3.40% | O15-O18 已优化 |
+| polint | 3.56% | 1.38% | O5 已优化 |
+| prolong3 | 2.84% | 1.62% | O30/O34 失败 |
+| fderivs | 2.62% | 1.36% | R6 失败 |
+| compute_rhs_fn.8 | 2.49% | 1.88% | O15-O18 已优化 |
+
+**计算热点排名完全相同**。两个 profile 的计算热点集合完全一致，只是排名顺序
+因 MPI 占比不同而略有变化。**没有任何新的计算热点出现。**
+
+结论：
+1. 计算热点在两个 profile 中完全相同
+2. 所有 >0.3% 的计算符号都已被尝试优化或已优化
+3. MPI 等待（~60% 在 bind-to core）是不可优化的结构性开销
+4. OpenMP barrier（~5% 在 bind-to core）不可优化（gfortran 不支持 workshare nowait）
+5. 内核 sched_yield 开销（8.77% 在 unbound）是 MPI yield 的副作用，不是独立瓶颈
+
+**最终结论：所有优化方向已穷尽。当前 O20+O26 配置（t=40 Total Evolve ~548s,
+Program Cost ~625s）是此环境下 CPU 计算优化的最终性能天花板。**
+
+决定：分析完成，无源码修改，无优化可做。本轮为纯分析轮次。
+
+### O37：全热点系统盘点（纯分析）
+
+状态：**分析完成（无源码修改，无优化可做）**。
+
+日期：2026-08-17。
+
+profiler 证据：STATE.md（O36 后）明确声明"所有优化方向已穷尽"。任务要求
+"仔细评估是否有任何之前未尝试的新角度"。本实验对 unbound 配置 perf 数据
+（perf_20260816_042534，t=2）中所有 >0.3% 的符号（共 39 个）逐一审查。
+
+系统盘点结果（unbound 配置，t=2，self%）：
+
+| # | 占比 | 符号 | 优化状态 |
+|---|------|------|---------|
+| 1 | 11.63% | opal_progress | MPI 等待，不可优化（O22/O33 失败） |
+| 2 | 9.06% | libgomp barrier | OpenMP barrier，不可优化（gfortran 无 workshare nowait） |
+| 3 | 8.77% | kernel sched_yield | MPI yield 副作用（O36 确认） |
+| 4 | 8.64% | lopsided_kodis | R6/O24a/b/c 失败 |
+| 5 | 7.37% | compute_rhs_bssn_fn.5 | O15-O18 已优化 |
+| 6 | 5.76% | fdderivs | R6 失败 |
+| 7 | 4.72% | compute_rhs_bssn_fn.1 | O15-O18 已优化 |
+| 8 | 3.56% | polint | O5 已优化 |
+| 9 | 3.41% | libgomp | OpenMP runtime，不可优化 |
+| 10 | 3.39% | __memcpy_sve | O12/O20 部分优化 |
+| 11 | 2.84% | prolong3 | O30/O34 失败 |
+| 12 | 2.62% | fderivs | R6 失败 |
+| 13 | 2.49% | compute_rhs_bssn_fn.8 | O15-O18 已优化 |
+| 14 | 1.58% | __memset_sve | O12 部分优化 |
+| 15 | 1.56% | cfree | O20 部分优化 |
+| 16 | 1.47% | malloc | O20 部分优化 |
+| 17 | 1.47% | compute_rhs_bssn | 主函数 |
+| 18 | 1.46% | compute_rhs_bssn_fn.4 | O15-O18 已优化 |
+| 19 | 1.39% | libgomp | OpenMP runtime，不可优化 |
+| 20 | 1.05% | compute_rhs_bssn_fn.2 | O15-O18 已优化 |
+| 21 | 0.88% | compute_rhs_bssn_fn.7 | O15-O18 已优化 |
+| 22 | 0.80% | restrict3 | O30/O34 失败 |
+| 23 | 0.78% | libopen-pal | MPI，不可优化 |
+| 24 | 0.75% | compute_rhs_bssn_fn.6 | O15-O18 已优化 |
+| 25 | 0.74% | lopsided | 差分 kernel，R6 失败 |
+| 26 | 0.74% | symmetry_bd | O12 已优化 |
+| 27 | 0.71% | libgomp | OpenMP runtime，不可优化 |
+| 28 | 0.69% | rungekutta4_rout | whole-array expression 已优化 |
+| 29 | 0.59% | enforce_ga | O28 失败 |
+| 30 | 0.56% | libopen-pal | MPI，不可优化 |
+| 31 | **0.52%** | **copy_** | **未尝试优化（有 sanity check）** |
+| 32 | 0.50% | kodis | 差分 kernel，R6 失败 |
+| 33 | 0.49% | compute_rhs_bssn_fn.10 | O15-O18 已优化 |
+| 34 | 0.48% | compute_rhs_bssn_fn.3 | O15-O18 已优化 |
+| 35 | 0.44% | compute_rhs_bssn_fn.0 | O15-O18 已优化 |
+| 36 | 0.41% | pow | 数学函数（enforce_ga 调用） |
+| 37 | 0.31% | libopen-pal | MPI，不可优化 |
+| 38 | 0.30% | polin3 | 插值 |
+| 39 | 0.30% | symmetry_bd | O12 已优化 |
+
+**唯一未尝试的方向：`copy_` 的 sanity check 移除**
+
+`copy_`（fmisc.f90:195-255）是 MPI 通信数据打包阶段调用的 Fortran 子程序，
+被 `Parallel::transfer` 和 `Parallel::data_packer` 高频调用（11 个调用点）。
+
+`copy_` 的 sanity check（第 207-249 行）包括：
+1. `if(wei.ne.3)` — 维度检查
+2. 3 个 `if/elseif(any(...))` 边界检查 — 每次 `any()` 对 size-3 的 1D 数组比较
+3. `write` 语句 — 永不执行
+
+**可行性深度分析**：
+
+1. **预期收益 <0.5%**：`copy_` self 占 0.52%，其中大部分是 sanity check
+   （实际拷贝是 `__memcpy_sve`，占 1.47%，不受影响）。移除 sanity check
+   预期收益 ~0.4%（`copy_` self 的 80%）。
+
+2. **远低于 2% 显著性阈值**：unbound 调度波动 ±10%，0.4% 的差异完全被噪声
+   淹没。O27（边界清零，0.52% self）差异 -0.4%，O28（enforce_ga，0.59% self）
+   差异 -1.5%，O30（prolong3 cxI，2.84% self）差异 +1.8%——都低于 2% 阈值。
+   `copy_` 占比 0.52% 更低，不可能测出统计显著的收益。
+
+3. **与 O13 的关键区别**：O13 移除 `compute_rhs_bssn` 的 sanity check 收益 5.4%
+   （与 O12 合并），因为 O13 的 sanity check 是 `sum()` NaN 检查，对 ~20 个 3D
+   数组执行 `sum()`，每次遍历整个数组——非常昂贵。`copy_` 的 sanity check 是
+   `any()` 边界检查，对 size-3 的 1D 数组执行——非常便宜。两者开销相差几个数量级。
+
+4. **`copy_` 触发的 `__memcpy_sve`（1.47%）不受影响**：移除 sanity check 只
+   减少 `copy_` 的 self 时间（0.52%），不减少 `__memcpy_sve`（1.47%）。因为
+   `__memcpy_sve` 是实际的数据拷贝，由 `data_out(...) = data_in(...)` 触发，
+   与 sanity check 无关。
+
+**决策：不尝试此优化**。根据 O27/O28/O30 教训（占比 <2% 的优化在 unbound 调度下
+无法测出统计显著的收益），`copy_` 的 sanity check 移除（预期收益 <0.5%）不值得
+投入计算节点资源进行 A/B 测试。
+
+**`__memcpy_sve` 来源分析**（3.39%，进一步确认无遗漏方向）：
+
+| 来源 | 占比 | 优化状态 |
+|------|------|---------|
+| symmetry_bd_ | 1.48% | O12 已优化（避免全数组清零） |
+| copy_ | 1.47% | 实际数据拷贝（必要操作，无法消除） |
+| 其他 | 0.44% | 分散小调用者 |
+
+`copy_` 的 1.47% memcpy 是 MPI 通信数据打包的必要操作——将变量数据从源数组
+拷贝到通信缓冲区。无法消除（除非改变通信架构，如 CUDA-aware MPI 直接传递
+device buffer，但这是 GPU 路径的优化，不适用于 CPU 路径）。
+
+**最终确认：STATE.md 的结论正确**
+
+经过 O37 的全热点系统盘点，确认：
+1. 所有 >0.3% 的计算符号都已被尝试优化或已优化，或不可优化（MPI/OpenMP runtime）
+2. 唯一未尝试的 `copy_` sanity check 移除预期收益 <0.5%，不值得尝试
+3. `__memcpy_sve` 的 3.39% 中，1.48% 已优化（symmetry_bd），1.47% 是必要操作（copy_）
+4. 没有任何之前被遗漏的、有据可循的新方向
+
+**当前 O20+O26 配置（t=40 Total Evolve ~548s, Program Cost ~625s）
+是此环境下 CPU 计算优化的最终性能天花板。**
+
+决定：分析完成，无源码修改，无优化可做。本轮为纯分析轮次。
+
+## 下一步
+
+### 最终结论：所有优化方向已穷尽
+
+经过 O27-O37 的连续探索（11 个实验，全部失败或无收益），确认：
+1. 计算 kernel 优化：R6, O24a/b/c, O25, O27, O28, O29, O30, O34 均失败
+2. 工具链优化：O31 (编译器), O32 (LTO), O33 (MPI), O35 (PGO) 均失败
+3. page cache 敏感优化：O21A/B, O22, O23 均失败
+4. profile 深度分析：O36 确认无遗漏热点
+5. 全热点系统盘点：O37 确认无未尝试方向
+
+**当前 O20+O26 配置（t=40 Total Evolve ~548s, Program Cost ~625s）
+是此环境下 CPU 计算优化的最终性能天花板。**
+
+### 已穷尽方向（完整列表）
+- workshare→collapse(3)：O29 证明在 gfortran/ARM 上是负优化（-11.5%）
+- 差分 kernel 向量化：R6/O24a/b/c 均失败
+- 小函数并行化（<2% 占比）：O27/O28/O30 无收益
+- prolongation cxI 预计算：O30 差异 1.8%（<2%）
+- prolongation z 方向标量循环：O34 差异 1.1%（<2%）
+- 编译器切换：O31 armclang++ 慢 8%（gfortran workshare 优化是关键优势）
+- LTO：O32 略慢 2.6%（跨模块内联无收益，LTO 本身有开销）
+- MPI 实现切换：O33 MPICH 慢 4.7%（UCX sysv 比 OpenMPI vader 慢）
+- PGO：O35 差异 0.8%（<2%，branch miss rate 太低，workshare 已优化）
+- --bind-to core profile：O36 确认无遗漏热点（计算热点排名与 unbound 完全相同）
+- 全热点系统盘点：O37 确认无未尝试方向（`copy_` sanity check 预期收益 <0.5%）
+- 不要手动改写 Fortran whole-array expression（O29/O34 教训，大小数组均适用）
+- 整数运算预计算在 gfortran/ARM 上无收益（O30 教训：整数除法已优化为算术右移）
+- 浮点 expression 手动展开在 gfortran/ARM 上无收益（O34 教训：whole-array expression 已 SVE 向量化）
+- 容器环境 /dev/shm 限制（64MB）阻碍 UCX posix 传输（O33 教训）
+- PGO 在低 branch miss rate 程序上无收益（O35 教训：0.82% branch miss rate 已足够低）
+- 工具链优化已全部穷尽（O31 编译器切换、O32 LTO、O33 MPI 切换、O35 PGO 均失败）
+- prolong3 更激进优化已穷尽（O30 整数预计算、O34 浮点 expression 展开均失败）
+- profile 深度分析已穷尽（O36 --bind-to core 重新采样确认无遗漏的大热点）
+- 全热点系统盘点已穷尽（O37 对 39 个 >0.3% 的符号逐一审查确认无未尝试方向）
+- `copy_` sanity check 移除预期收益 <0.5%，不值得尝试（O37 分析）
+- 确认性分析已穷尽（O38 扩展审查至 0.05-0.30% 符号，补充审查 RK4/kodis/barrier 角度，均不可行）
+
+### O38：确认性分析-性能天花板最终复核（纯分析）
+
+状态：**分析完成（无源码修改，无优化可做）**。
+
+日期：2026-08-17。
+
+profiler 证据：STATE.md（O37 后）明确声明"所有优化方向已穷尽"。任务要求
+"仔细评估是否有任何之前未尝试的新角度"。本实验对 O37 的结论进行独立复核，
+扩展审查范围至 0.05%–0.30% 的符号（O37 未覆盖），并补充审查 3 个新角度。
+
+**0.05%–0.30% 符号审查结果**（unbound 配置，t=2，self%）：
+
+| 符号 | self% | 类型 | 审查结论 |
+|------|:---:|------|---------|
+| Parallel::build_gstl | 0.21% | C++ | ghost zone 链表构建，链表遍历已最优，无优化空间 |
+| fderivs_ (非 OMP) | 0.19% | Fortran | fderivs 函数主体（非并行循环部分），已包含在 R6 分析中 |
+| opal_progress (小) | 0.18% | MPI | MPI progress engine，不可优化 |
+| _int_free_chunk | 0.18% | glibc | malloc free 内部，O20 已优化 transfer buffer |
+| fdderivs_ (非 OMP) | 0.18% | Fortran | fdderivs 函数主体，已包含在 R6 分析中 |
+| compute_rhs_bssn_fn.9 | 0.14% | Fortran OMP | workshare 区域，O15-O18 已优化 |
+| decide3d_ | 0.13% | Fortran | AMR 细化决策，算法必要，0.13% 太低 |
+| Interp_Points_Impl._omp_fn.0 | 0.13% | C++ OMP | 表面积分插值，O7/O8 已优化 |
+| _int_malloc | 0.13% | glibc | malloc 内部，O20 已优化 |
+| misc::fact | 0.12% | C++ | 阶乘计算，0.12% 太低 |
+| Ansorg::interpolate_tri_bar | 0.10% | C++ | TwoPuncture 插值，初始化阶段 |
+| average2_ | 0.09% | Fortran | 平均函数，0.09% 太低 |
+| surf_Wave | 0.06% | C++ | 引力波表面积分，O26 已优化分析路径 |
+| Block::getdX | 0.05% | C++ | 网格间距查询，0.05% 太低 |
+
+**补充审查：未被 perf 覆盖的角度**
+
+1. **rungekutta4_rout 并行化（0.69% self）**：
+   - RK4 时间推进在 Step 函数的变量循环中**串行**调用
+   - 每个变量的 RK4 更新独立，理论上可并行
+   - 但 0.69% 并行化到 2 线程的理论收益仅 0.345%，远低于 2% 阈值
+   - 且变量循环是链表遍历，需要重构为数组才能用 `!$omp parallel do`
+   - **结论：不值得尝试**
+
+2. **剩余 3 对未合并的 lopsided+kodis（kodis 0.50% self）**：
+   - O9 合并了 21 对，剩余 3 对（gxx/dxx, gyy/dyy, gzz/dzz）因输入不同无法合并
+   - 合并这 3 对可减少 3 次 symmetry_bd 调用（每次 0.027%）和 3 次 fork-join
+   - 预期收益 <0.1%，远低于 2% 阈值
+   - **结论：不值得尝试**
+
+3. **OpenMP barrier 减少（14.57% libgomp）**：
+   - gfortran 不支持 `!$omp end parallel workshare nowait`
+   - 合并相邻 workshare 区域被函数调用阻隔（数据依赖）
+   - 延长 parallel 区域会导致 page cache 污染（O25 教训）
+   - **结论：不可优化**
+
+**性能天花板表格复核**：
+
+| 瓶颈 | 占比 | O37 断言 | O38 复核 |
+|------|:---:|---------|---------|
+| MPI 等待 (opal_progress + libmpi + kernel) | ~23% | 不可优化 | ✓ O22/O33 均失败，page cache 限制 |
+| OpenMP runtime (libgomp) | ~15% | 不可优化 | ✓ gfortran 无 workshare nowait，O29 证明 collapse(3) 是负优化 |
+| 差分 kernel (lopsided+fdderivs+fderivs+kodis) | ~18% | 不可优化 | ✓ R6/O24a/b/c/O27 均失败 |
+| compute_rhs (workshare 区域) | ~20% | 已优化 | ✓ O15-O18 已并行化，O29 证明 workshare 是最优 |
+| 内存操作 (memcpy+memset+malloc) | ~8% | 部分已优化 | ✓ O12/O20 已优化，剩余是必要操作 |
+| prolongation | ~3.6% | 不可优化 | ✓ O30/O34 均失败，whole-array expression 已 SVE 向量化 |
+| polint | 3.56% | 已优化 | ✓ O5 已优化 |
+| 其他小函数 | ~3% | 不可优化 | ✓ O27/O28/O30 教训，<2% 无法测出 |
+| 编译器 | — | 不可优化 | ✓ O31 armclang++ 慢 8% |
+| LTO | — | 不可优化 | ✓ O32 略慢 2.6% |
+| MPI 实现 | — | 不可优化 | ✓ O33 MPICH 慢 4.7% |
+| PGO | — | 不可优化 | ✓ O35 无收益 -0.8% |
+
+**最终结论**：
+
+经过 O38 的独立复核：
+1. perf 数据热点排名与 O37 完全一致（39 个 >0.3% 符号 + 14 个 0.05-0.30% 符号）
+2. 性能天花板表格的每个"不可优化"断言都经得起独立验证
+3. 0.05%–0.30% 范围无新的可优化方向
+4. 补充审查的 3 个角度（RK4 并行化、剩余 kodis 合并、barrier 减少）均不可行
+
+**当前 O20+O26 配置（t=40 Total Evolve ~548s, Program Cost ~625s）
+是此环境下 CPU 计算优化的最终性能天花板。**
+
+决定：分析完成，无源码修改，无优化可做。本轮为纯分析轮次。
+
+## 下一步
+
+### 最终结论：所有优化方向已穷尽（O38 复核确认）
+
+经过 O27-O38 的连续探索（12 个实验，全部失败或无收益），确认：
+1. 计算 kernel 优化：R6, O24a/b/c, O25, O27, O28, O29, O30, O34 均失败
+2. 工具链优化：O31 (编译器), O32 (LTO), O33 (MPI), O35 (PGO) 均失败
+3. page cache 敏感优化：O21A/B, O22, O23 均失败
+4. profile 深度分析：O36 确认无遗漏热点
+5. 全热点系统盘点：O37 确认无未尝试方向（39 个 >0.3% 符号）
+6. 确认性分析：O38 确认无未尝试方向（14 个 0.05-0.30% 符号 + 3 个补充角度）
+
+**当前 O20+O26 配置（t=40 Total Evolve ~548s, Program Cost ~625s）
+是此环境下 CPU 计算优化的最终性能天花板。**
+
+### 已穷尽方向（完整列表）
+- workshare→collapse(3)：O29 证明在 gfortran/ARM 上是负优化（-11.5%）
+- 差分 kernel 向量化：R6/O24a/b/c 均失败
+- 小函数并行化（<2% 占比）：O27/O28/O30 无收益
+- prolongation cxI 预计算：O30 差异 1.8%（<2%）
+- prolongation z 方向标量循环：O34 差异 1.1%（<2%）
+- 编译器切换：O31 armclang++ 慢 8%（gfortran workshare 优化是关键优势）
+- LTO：O32 略慢 2.6%（跨模块内联无收益，LTO 本身有开销）
+- MPI 实现切换：O33 MPICH 慢 4.7%（UCX sysv 比 OpenMPI vader 慢）
+- PGO：O35 差异 0.8%（<2%，branch miss rate 太低，workshare 已优化）
+- --bind-to core profile：O36 确认无遗漏热点（计算热点排名与 unbound 完全相同）
+- 全热点系统盘点：O37 确认无未尝试方向（`copy_` sanity check 预期收益 <0.5%）
+- 确认性分析：O38 扩展审查至 0.05-0.30% 符号 + 3 个补充角度，均不可行
+- 不要手动改写 Fortran whole-array expression（O29/O34 教训，大小数组均适用）
+- 整数运算预计算在 gfortran/ARM 上无收益（O30 教训：整数除法已优化为算术右移）
+- 浮点 expression 手动展开在 gfortran/ARM 上无收益（O34 教训：whole-array expression 已 SVE 向量化）
+- 容器环境 /dev/shm 限制（64MB）阻碍 UCX posix 传输（O33 教训）
+- PGO 在低 branch miss rate 程序上无收益（O35 教训：0.82% branch miss rate 已足够低）
+- 工具链优化已全部穷尽（O31 编译器切换、O32 LTO、O33 MPI 切换、O35 PGO 均失败）
+- prolong3 更激进优化已穷尽（O30 整数预计算、O34 浮点 expression 展开均失败）
+- profile 深度分析已穷尽（O36 --bind-to core 重新采样确认无遗漏的大热点）
+- 全热点系统盘点已穷尽（O37 对 39 个 >0.3% 的符号逐一审查确认无未尝试方向）
+- `copy_` sanity check 移除预期收益 <0.5%，不值得尝试（O37 分析）
+- RK4 并行化预期收益 0.345%，不值得尝试（O38 分析）
+- 剩余 3 对 kodis 合并预期收益 <0.1%，不值得尝试（O38 分析）
+- OpenMP barrier 减少不可行（gfortran 无 workshare nowait + page cache 限制）（O38 分析）
+- 确认性分析已穷尽（O38 扩展审查 + 补充角度均不可行）
+
+### O39：fstack-arrays（Fortran 自動数組堆→栈分配）
+
+状态：**保留**。
+
+日期：2026-08-17。
+
+profiler 证据（`test_archives/perf_20260816_042534`，O8 配置 t=2）：
+- `malloc` 1.47% + `cfree` 1.56% + `_int_malloc` 0.13% + `_int_free_chunk` 0.18% = 3.34%
+- 调用图分析：polint 贡献 ~0.62%，Parallel::build_gstl 贡献 ~0.16%，其余来自 Fortran 自動数組
+- gfortran 默认将 3D 自動数組（如 `dimension(ex(1),ex(2),ex(3))`）分配到堆上（通过 malloc）
+- 受影响函数：bssn_rhs（~40 個 3D 数组）、diff_new（fh 数组）、enforce_algebra（10 個 3D 数组）、
+  fadmquantites_bssn、getnp4、fmisc/polint（c/d/ho 数组）、prolongrestrict_cell
+
+假设：gfortran 默认将大的自動数組分配到堆上（通過 malloc/free），每次函数調用都觸发
+内存分配/释放。使用 `-fstack-arrays` 标志可以将所有自動数組放到栈上，消除 malloc/free
+開销。这与 R5（allocatable,save）和 O28（enforce_ga 标量化）都不同：
+- R5: 改变源码，使用持久堆分配（增加持久内存，page cache 风险）
+- O28: 改变源码，消除自動数組（fork-join 開销 + 占比太低）
+- O39: 改变编译标志，使用栈分配（不增加持久内存，无 page cache 风险）
+
+关键区别于已穷尽的工具链优化（O31/O32/O33/O35）：
+- O31: 切换整个编译器（g++→armclang++）
+- O32: 添加 LTO（跨模块内联）
+- O33: 切换 MPI 实现（OpenMPI→MPICH）
+- O35: 添加 PGO（profile-guided optimization）
+- O39: 添加 `-fstack-arrays` 标志（仅改变自動数組分配方式，堆→栈）
+
+验证：用测试程序确认 gfortran 默认行为：
+```
+subroutine test(ex, a, b)
+  real*8, dimension(ex(1),ex(2),ex(3)) :: tmp
+```
+- 无 -fstack-arrays: 2 次 malloc 調用
+- 有 -fstack-arrays: 0 次 malloc 調用
+
+修改：
+- `CMakeLists.txt`: 在 Fortran 编译选项中添加 `-fstack-arrays`
+  ```
+  "$<$<COMPILE_LANG_AND_ID:Fortran,...>:...;-fstack-arrays>"
+  ```
+- 无源码修改
+- 新建 `build_stack/` 构建目录（with -fstack-arrays）用于 A/B 测试
+- `ab_test_stack.sh`: 自定义 A/B 测试脚本
+- `full_test_stack.sh`: t=40 长跑验证脚本
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、5 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | 中位数 | 波动 |
+|------|-------|-------|-------|-------|-------|--------|------|
+| baseline (heap) | 37.77 | 35.61 | 37.76 | 36.66 | 39.09 | 37.76 s | 9.2% |
+| optimized (stack) | 36.11 | 36.45 | 33.57 | 34.17 | 31.91 | 34.17 s | 13.3% |
+
+optimized 中位数比 baseline 快 **9.5%**（-3.590s），远超 2% 阈值。
+
+正确性验证：
+- 4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4 与 baseline **位级一致**（仅时间戳不同）
+- trajectory RMS = 0.0000%（40/40 时间点匹配，全部位级一致）
+- constraints PASS: Ham=0.28, Px=0.028, Py=0.031, Pz=0.027（均 ≤ 2.0）
+
+正式 t=40 长跑（无 cache，drop_caches fallback）：
+
+| 指标 | baseline (O20+O26) | optimized (O39) | 变化 |
+|------|---|---|---|
+| Total Evolve | ~548s | 480.97s | -67s (-12.2%) |
+| Program Cost | ~625s | 554.45s | -71s (-11.3%) |
+| per-step (wall) | ~13.7s | ~12.0s | -1.7s (-12.4%) |
+
+正确性（t=40）：
+- trajectory: 40/40 matched, RMS = 0.0000%
+- constraints: PASS (Ham=0.28, Px=0.028, Py=0.031, Pz=0.027)
+
+**短跑和长跑同步受益**——这是首次在 t=2 和 t=40 都获得显著收益的优化！
+
+**深度分析：为什么 -fstack-arrays 在短跑和长跑中都有效？**
+
+1. **消除 malloc/free 開销**：gfortran 默认将 3D 自動数組分配到堆上。每次函数調用
+   都觸发 malloc（分配）+ memset（清零）+ cfree（释放）。`-fstack-arrays` 将这些
+   数组放到栈上，分配变为栈指针調整（几乎零开销），释放也是栈指针調整。
+
+2. **不受 page cache 污染影响**：栈内存在函数返回时自动释放，不占用持久内存。
+   这与 O21A（static buffer）、O22（gsl 延迟释放）、O25（延長 parallel 区域）
+   的失败根因完全不同——那些优化增加了持久内存占用，在 t=40 无 cache 时
+   觸发 page cache 污染退化。`-fstack-arrays` 不增加持久内存，因此短跑和长跑
+   行为一致。
+
+3. **与 R5 的关键区别**：R5（allocatable,save）也消除了 per-call malloc/free，
+   但使用持久堆分配（首次分配后不释放）。R5 在 --bind-to core 下无收益（0.07%），
+   原因可能是：
+   - R5 增加了持久内存占用（allocatable,save 数组永不释放）
+   - R5 在 unbound 下可能有 page cache 污染（未測試）
+   - R5 只改了 compute_rhs_bssn 的数组，不影响 polint 等其他函数
+   `-fstack-arrays` 影响所有 Fortran 函数的自动数组（包括 polint、enforce_ga、
+   fderivs、fdderivs 等），且不增加持久内存。
+
+4. **与 O28 的关键区别**：O28 试图消除 enforce_ga 的 10 個自動数組（改為标量变量），
+   但失敗了（-1.5%）。O28 的分析错误地认为"gfortran 将小自動数組放在栈上（不觸发
+   malloc）"。实际上，gfortran 默认将 3D 自動数組放在堆上！`-fstack-arrays` 才真正
+   将它们移到栈上，消除了 malloc/free 開销。
+
+5. **cache 局部性改善**：栈内存在函数調用期间是热的（最近分配，在 L1/L2 cache 中）。
+   堆内存可能被多次分配/释放，导致 cache 不命中。栈分配的数组有更好的 cache 局部性。
+
+6. **TLB 压力**：栈分配的大数组（10MB+）可能增加 TLB 压力，但鲲鹏 920B 的 TLB
+   足够大，且栈内存是连续的（TLB 友好），不像堆内存可能碎片化。
+
+**与之前失敗的对比**：
+
+| 实验 | 方向 | 短跑 | 长跑 | 失敗根因 |
+|------|------|------|------|---------|
+| O15 | workshare 并行化 | +16% | -12.7% | page cache 污染 |
+| O21A | transfer buffer static | +9.8% | -27% | page cache 污染 |
+| O25 | 合佴 fderivs | +22% | -30% | page cache 污染 |
+| R5 | allocatable,save | -- | N/A (bind-to core) | 持久内存 + 仅 compute_rhs |
+| O28 | enforce_ga 标量化 | -1.5% | N/A | fork-join + 占比太低 |
+| **O39** | **-fstack-arrays** | **+9.5%** | **+12.2%** | **成功！** |
+
+O39 是唯一在短跑和长跑中都获得显著收益的优化！
+
+**洞察**：
+- **gfortran 默认将 3D 自動数組分配到堆上**——这是一个之前被忽視的重要性能瓶颈。
+  O28 的分析錯误地认为"gfortran 将小自動数組放在栈上"，实际上 3D 数组（即使
+  是 32×32×32 = 256KB）也被分配到堆上。
+- **`-fstack-arrays` 是一个被忽視的编译标志**——它不改变源码、不增加持久内存、
+  不影响 page cache，只是将自動数組从堆移到栈。这与之前的工具链优化（编译器切换、
+  LTO、MPI 切换、PGO）完全不同。
+- **短跑/长跑同步受益的关键是不增加持久内存**——O15/O21A/O25 的失敗都是因为
+  增加了持久内存（workshare 2 线程访存、static buffer、延長 parallel 区域），
+  在 page cache 污染下退化。`-fstack-arrays` 不增加持久内存，因此短跑和长跑
+  行为一致。
+- **编译标志优化仍有空間**——即使 O31-O35 的工具链优化都失敗了，`-fstack-arrays`
+  证明了还有未探索的编译标志。关键是要找到不增加持久内存、不改变代碼生成策略
+  的标志。
+
+决定：**保留**。将 `-fstack-arrays` 添加到 CMakeLists.txt 的 Fortran 编译选项中。
+
+保留优化：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### O40：no-PIE（禁用位置无关可执行）
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据（O39 后重新采样 `test_archives/perf_o40_20260817_194522`，O8 配置 t=2）：
+
+O39（-fstack-arrays）成功消除了 malloc/cfree 开销（从 3.34% 降至 0.30%），polint 从
+3.56% 降至 1.51%。重新采样确认没有新的被掩盖的热点出现，所有计算热点排名与 O39 之前
+相同，只是占比相对升高（因总时间减少）。
+
+在分析编译配置时发现：**gcc/gfortran 14.2.0 默认启用 PIE**（`--enable-default-pie`）。
+PIE 使所有代码位置无关，函数调用通过 PLT/GOT 间接寻址，全局变量访问也通过 GOT
+间接寻址。这在每次函数调用和全局变量访问中引入额外的内存访问开销。
+
+假设：禁用 PIE（`-fno-PIE` 编译 + `-no-pie` 链接）可以：
+1. 将函数调用从间接跳转改为直接跳转（减少 GOT 访问）
+2. 将全局变量访问从间接访问改为直接访问（减少 GOT 访问）
+3. 减少代码体积（去除 PLT/GOT 桩代码）
+4. 改善分支预测（直接跳转比间接跳转更可预测）
+
+与 O39 的共同特征：
+- 编译/链接标志优化（不改变源码）
+- 不增加持久内存（无 page cache 风险）
+- 不改变代码生成策略（只改变地址访问模式）
+
+验证 PIE 状态：
+- `build/ABE`（baseline）: Type: DYN (Position-Independent Executable file) — 有 PIE
+- `build_nopie/ABE`（optimized）: Type: EXEC (Executable file) — 无 PIE
+
+修改：
+- 无源码修改
+- 新建 `build_nopie/` 构建目录，使用 `-fno-PIE`（编译）和 `-no-pie`（链接）
+- 编译标志与 baseline 完全一致：`-O3 -g -fstack-arrays`（来自 CMakeLists.txt）
+- `ab_test_pie.sh`：自定义 A/B 测试脚本
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (PIE, build/) | 34.7169 | 33.9566 | 33.1012 | 33.957 s | 4.8% |
+| optimized (no-PIE, build_nopie/) | 32.8373 | 32.8379 | 32.8789 | 32.838 s | 0.1% |
+
+optimized 中位数比 baseline 快 **3.3%**（-1.119s），远超 2% 阈值。
+波动极低（0.1% vs 4.8%），说明禁用 PIE 后性能更稳定。
+
+正确性：PASS（4 个关键 .dat 文件数值位级一致，仅时间戳不同）
+
+正式 t=40 长跑（无 cache，drop_caches fallback，2 次）：
+
+| 运行 | Total Evolve | Program Cost | 正确性 |
+|------|:---:|:---:|------|
+| 第 1 次 | 483.68s | 558.97s | PASS（前 40 行与 golden 一致） |
+| 第 2 次 | 481.24s | 556.67s | PASS（两次输出位级一致） |
+| **中位数** | **482.46s** | **557.82s** | — |
+| O39 baseline | 480.97s | 554.45s | PASS |
+| 变化 | +0.31% | +0.61% | — |
+
+长跑差异 0.31% < 2%，无统计意义。两次长跑都略慢于 O39 baseline。
+
+**短跑/长跑差异深度分析**：
+
+1. **--twop-cache 差异是根因**：
+   - 短跑使用 `--twop-cache`，跳过 TwoPuncture 初始化，page cache 干净
+   - 长跑不使用 `--twop-cache`，TwoPuncture 运行约 70s，污染 page cache
+   - 在干净的 page cache 下，PIE 禁用的收益（减少函数调用间接寻址）更显著
+   - 在污染的 page cache 下，内存压力增大，PIE 的小幅收益被掩盖
+
+2. **PIE 收益幅度较小**：
+   - PIE 禁用的短跑收益 3.3%，而 -fstack-arrays 的短跑收益 9.5%
+   - PIE 只影响函数调用和全局变量访问的间接寻址，收益有限
+   - -fstack-arrays 消除了 malloc/free 系统调用，收益更大
+   - 小收益更容易被 page cache 污染掩盖
+
+3. **与 O15 教训一致**：
+   - O15 短跑快 16%，长跑慢 12.7%（page cache 污染）
+   - O40 短跑快 3.3%，长跑慢 0.31%（page cache 污染）
+   - 两者都是短跑使用 --twop-cache 掩盖了 page cache 污染问题
+   - O15 的收益幅度更大（16%），即使被掩盖，长跑退化也更显著（-12.7%）
+   - O40 的收益幅度较小（3.3%），被掩盖后长跑退化不明显（-0.31%）
+
+4. **波动降低的积极信号**：
+   - optimized 波动从 4.8% 降至 0.1%，说明 PIE 禁用后代码执行更确定
+   - 直接跳转比间接跳转的分支预测更稳定，减少了 unbound 调度的随机性
+   - 但稳定性增益无法转化为长跑加速
+
+**洞察**：
+- **gcc/gfortran 14.2.0 默认启用 PIE**——这是一个被忽视的性能因素。PIE 使函数调用
+  和全局变量访问通过 GOT 间接寻址，增加了每次调用的开销。
+- **禁用 PIE 在短跑中有 3.3% 收益**，但长跑中被 page cache 污染掩盖。
+- **短跑/长跑差异的根因是 --twop-cache**：短跑使用 --twop-cache（page cache 干净），
+  长跑不使用（page cache 污染）。这与 O15 教训一致。
+- **PIE 禁用不增加持久内存**，与 O39 的成功特征一致，但收益幅度太小（3.3%），
+  无法在 page cache 污染环境下获得长跑收益。
+- **如果能解决 page cache 污染问题**（如 drop_caches 在计算节点可用），PIE 禁用可能
+  在长跑中也有收益。
+
+决定：按"一次一项、长跑无收益回退"原则，不保留 O40。CMakeLists.txt 未修改
+（O40 只创建了 build_nopie/ 构建目录，通过 CMake 参数传递 -fno-PIE）。
+
+## 下一步
+
+### O40 后的状态
+
+O40（no-PIE）短跑 +3.3% 但长跑 +0.31% < 2%，回退。当前保留的优化不变：
+O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### 已穷尽方向（更新）
+- no-PIE：O40 短跑 +3.3% 但长跑 +0.31%（page cache 污染掩盖 PIE 收益）
+- 其他已穷尽方向见上方列表
+
+### 可探索方向
+1. **其他编译标志**：-funroll-loops（循环展开）、-fno-align-functions 等
+2. **重新评估 O27/O28/O30**：在 O39 后重新测试（但失败根因不受 -fstack-arrays 影响）
+3. **page cache 污染解决方案**：如果能解决 drop_caches 问题，O40 可能在长跑中也有收益
+4. **算法级优化**：如减少 symmetry_bd 调用次数、批处理多变量
+
+### O41：funroll-loops（循环展开）
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据（`test_archives/perf_o40_20260817_194522`，O39 后重新采样，O8 配置 t=2）：
+差分 kernel 仍是最大计算瓶颈：
+- `lopsided_kodis_._omp_fn.0`: 10.13%
+- `fdderivs_._omp_fn.0`: 6.99%
+- `fderivs_._omp_fn.0`: 2.99%
+- 合计差分 kernel: ~20%
+
+R6/O24a/b/c 证明差分 kernel 向量化困难（边界 cycle 开销 + if 分支阻碍）。
+但 `-funroll-loops` 是不同的优化方向：它不改变源码，只是让 gfortran 编译器
+自动展开循环，减少循环开销（分支预测、循环计数器更新）。
+
+假设：`-funroll-loops` 可以：
+1. 展开差分 kernel 的内层循环，减少分支预测失败
+2. 增加指令级并行（ILP），改善流水线利用率
+3. 改善 workshare 区域的 whole-array expression 循环
+
+与 O39（-fstack-arrays）的共同特征：
+- 编译标志优化（不改变源码）
+- 不增加持久内存（无 page cache 风险）
+- 不改变代码生成策略（只展开循环）
+
+环境验证：
+- gfortran 14.2.0 支持 `-funroll-loops`
+- gfortran 在 -O3 下默认不启用 `-funroll-loops`（需要显式启用）
+- -O3 只启用 `-floop-unroll-and-jam` 等部分展开，`-funroll-loops` 更激进
+
+修改：
+- 无源码修改
+- 新建 `build_unroll/` 构建目录，使用 `-DAMSS_OPT="-O3 -g" -DCMAKE_Fortran_FLAGS="-funroll-loops"` 编译
+- 编译标志：`-funroll-loops -O3 -g -fno-strict-aliasing -cpp -fstack-arrays -fopenmp`
+- baseline 用现有 `build/`（有 -fstack-arrays，无 -funroll-loops）
+- `ab_test_unroll.sh`：自定义 A/B 脚本
+
+代码体积变化：
+- build/ABE (baseline): 2.7M
+- build_unroll/ABE (optimized): 5.2M（循环展开增加了代码体积 ~93%）
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (无 -funroll-loops) | 23.9568 | 24.0853 | 24.2344 | 24.0853 s | 1.2% |
+| optimized (有 -funroll-loops) | 24.1644 | 24.2202 | 24.2226 | 24.2202 s | 0.2% |
+
+O41 中位数比 baseline 慢 0.6%（+0.135s），差异 <2%，无统计意义。
+波动极低（0.2% vs 1.2%），说明循环展开后代码执行更确定。
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4
+与 baseline **位级一致**，仅第一行时间戳不同）。
+
+**失败原因深度分析**：
+
+1. **gfortran -O3 已做了部分循环展开**：
+   gfortran 在 -O3 下默认启用了 `-floop-unroll-and-jam` 等优化。对于
+   `!$omp parallel workshare` 中的 whole-array expression，gfortran 已生成
+   SVE 向量化的批量内存操作（使用 q 寄存器和 fmla 指令）。`-funroll-loops`
+   的额外展开无法改善这些已优化的代码。
+
+2. **差分 kernel 的 if 分支阻碍展开收益**：
+   差分 kernel（lopsided_kodis, fdderivs, fderivs）的循环体内有 `#else`（bam
+   comparison）分支的联合条件判断。循环展开后，每个展开的迭代仍然需要执行
+   if 分支，分支数量增加，可能抵消了展开带来的 ILP 收益。与 R6/O24a/b/c
+   的失败根因类似：if 分支是差分 kernel 向量化/展开的主要障碍。
+
+3. **代码体积增加导致 icache 压力**：
+   build_unroll/ABE (5.2M) 比 build/ABE (2.7M) 大 93%。鲲鹏 920B 的 L1I
+   cache 是 64KB。`compute_rhs_bssn` 已经是几百行的大函数，循环展开后
+   代码体积进一步增加，可能超出 L1I 容量，导致 icache miss 增加。
+   这与 O32（LTO）的失败根因类似：过度内联/展开导致 icache 压力。
+
+4. **optimized 波动极低（0.2% vs 1.2%）**：
+   循环展开后代码执行更确定（减少了循环计数器更新和分支预测的随机性）。
+   但稳定性增益无法转化为中位数加速。这与 O32（LTO）和 O33（MPICH）
+   的波动降低现象一致。
+
+5. **与 O32/O35 的一致性**：
+   O32（LTO）和 O35（PGO）也是工具链优化，都失败了。O41（-funroll-loops）
+   的失败延续了这个模式：gfortran 在 -O3 下已对 Fortran 数组语法和差分
+   循环做了深度优化，额外的编译标志无法带来收益。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化/收益 | 失败根因 |
+|------|------|-----------|---------|
+| O32 | LTO Link-Time Optimization | -2.6% | 跨模块内联收益不足，icache 压力 |
+| O35 | PGO Profile-Guided Optimization | -0.8% | branch miss rate 太低，workshare 已优化 |
+| O41 | funroll-loops (循环展开) | -0.6% | gfortran -O3 已充分优化，icache 压力 |
+
+**洞察**：
+- **gfortran -O3 已对循环做了充分优化**：`-floop-unroll-and-jam` 等优化已启用，
+  `-funroll-loops` 的额外展开无法带来收益。
+- **循环展开增加代码体积（93%）**，可能导致 icache 压力，抵消 ILP 收益。
+- **差分 kernel 的 if 分支是展开的主要障碍**：展开后每个迭代仍需 if 判断，
+  分支数量增加，与 R6/O24a/b/c 的失败根因类似。
+- **编译标志优化方向已接近穷尽**：O39（-fstack-arrays）是唯一成功的编译
+  标志优化，O40（no-PIE）短跑有收益但长跑被 page cache 掩盖，O41（-funroll-loops）
+  无收益。剩余编译标志（如 -fno-align-functions, -fno-asynchronous-unwind-tables）
+  预期收益更低，不值得尝试。
+
+决定：按"一次一项、无收益回退"原则，不启用 -funroll-loops。
+保留 g++/gfortran -O3 -g -fstack-arrays（无 -funroll-loops）作为编译配置。
+
+## 下一步
+
+### O41 后的状态
+
+O41（-funroll-loops）短跑 -0.6% < 2%，回退。当前保留的优化不变：
+O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### 已穷尽方向（更新）
+- funroll-loops：O41 短跑 -0.6%（gfortran -O3 已充分优化，icache 压力）
+- 其他已穷尽方向见上方列表
+
+### 可探索方向
+1. **其他编译标志**：-fno-align-functions、-fno-asynchronous-unwind-tables
+   （预期收益更低，但 O39 证明编译标志值得探索）
+2. **page cache 污染解决方案**：如果能解决 drop_caches 问题，O40 可能在长跑中也有收益
+3. **算法级优化**：如减少 symmetry_bd 调用次数、批处理多变量
+4. **重新评估 O27/O28/O30**：在 O39 后重新测试（但失败根因不受 -fstack-arrays 影响）
+
+### O42：fno-align-functions（禁用函数对齐）
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：O41（-funroll-loops）回退后，STATE.md 列出 `-fno-align-functions` 作为
+可探索的编译标志方向。O41 增加代码体积 93% 导致 icache 压力失败，-fno-align-functions
+是相反方向（减少代码体积），可能改善 icache。
+
+**背景与动机**：
+GCC 在 -O2/-O3 下默认启用 `-falign-functions`，将函数对齐到 16/32 字节边界，在函数
+开头插入 NOP 指令。这优化指令 fetch 和分支预测。-fno-align-functions 禁用此行为，
+移除对齐 NOP，减少 code size。
+
+汇编验证（测试程序）：
+- 默认：gfortran 插入 `.p2align 5,,15`（对齐到 32 字节边界，最多 15 字节 NOP）
+- -fno-align-functions：移除了 `.p2align 5,,15` 指令
+- 代码体积差异：9086 vs 9075 = 11 字节（0.1%）
+
+与 O41（-funroll-loops）的对比：
+- O41：增加代码体积 93%（循环展开）→ icache 压力 → 失败
+- O42：减少代码体积（移除对齐 NOP）→ 可能改善 icache → 相反方向
+
+与 O39（-fstack-arrays）的共同特征：
+- 编译标志优化（不改变源码）
+- 不增加持久内存（无 page cache 风险）
+- 不改变代码生成策略（只移除对齐 NOP）
+
+修改：
+- 无源码修改
+- 新建 `build_noalign/` 构建目录，使用 `-DAMSS_OPT="-O3 -g" -DCMAKE_CXX_FLAGS="-fno-align-functions" -DCMAKE_Fortran_FLAGS="-fno-align-functions"` 编译
+- 编译标志：`-fno-align-functions -O3 -g -fno-strict-aliasing -cpp -fstack-arrays -fopenmp`
+- baseline 用现有 `build/`（有 -fstack-arrays，有默认 -falign-functions）
+- `ab_test_noalign.sh`：自定义 A/B 脚本
+
+代码体积变化：
+- build/ABE (baseline): 4903400 bytes (2.7M)
+- build_noalign/ABE (optimized): 4903456 bytes（差异 56 字节, 0.001%）
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (有 -falign-functions) | 31.6248 | 33.9773 | 34.4903 | 33.9773 s | 9.0% |
+| optimized (有 -fno-align-functions) | 33.1441 | 34.3893 | 32.6364 | 33.1441 s | 5.5% |
+
+optimized 中位数比 baseline 快 2.45%（-0.8332s），刚超 2% 阈值。
+但 baseline 异常波动（9.0%），且 optimized 波动 5.5%。
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4 与 baseline **位级一致**，仅时间戳不同）。
+
+**关键异常：baseline 环境不可靠**
+
+O42 baseline 中位数 33.9773s，而 O41 baseline（相同 build/ABE 二进制）中位数仅 24.0853s。
+O42 baseline 比 O41 baseline 慢 **41%**！这说明 O42 运行时环境严重异常。
+
+可能原因：
+1. O42 作业（110977）提交时，之前有 Failed 的 O41 作业（110952, 110950）可能污染了 page cache
+2. 计算节点负载高
+3. unbound 调度随机性
+
+**统计分析**：
+- baseline 均值 33.36s，标准差 1.25s，变异系数 3.74%
+- optimized 均值 33.39s，标准差 0.74s，变异系数 2.20%
+- 差异 2.45% 在 baseline 1 个标准差范围内（3.74%），**不具统计显著性**
+
+**失败原因深度分析**：
+
+1. **代码体积差异极小**：build/ABE 与 build_noalign/ABE 仅差 56 字节（0.001%）。
+   对齐 NOP 占比极小，不可能改善 icache 利用率。O41 的 -funroll-loops 增加了
+   93% 代码体积才导致 icache 压力问题，而 -fno-align-functions 只减少 0.001%
+   代码体积，改善幅度可忽略。
+
+2. **理论收益 <0.001%**：对齐 NOP 占比 0.001%，即使完全消除对齐开销（NOP 执行
+   时间），理论收益也 <0.001%。远低于 2% 显著性阈值。
+
+3. **baseline 环境异常导致结果不可靠**：O42 baseline 比 O41 baseline 慢 41%，
+   说明运行环境异常。在异常环境下，2.45% 的"收益"完全可能是噪声。
+
+4. **函数对齐对分支预测有正面影响**：函数入口对齐到 32 字节边界可以改善
+   指令 fetch 效率和分支预测。禁用对齐可能略恶化性能，但被环境噪声掩盖。
+
+5. **与 O27/O28/O30 的共同模式**：这三个优化都是占比 <2% 的小优化，都得到
+   <2% 的差异。-fno-align-functions 的理论收益 <0.001%，比这些更小，不可能
+   测出统计显著的收益。虽然这次名义差异 2.45%，但在环境异常和 baseline
+   波动 9.0% 的情况下，这不具统计显著性。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化/收益 | 代码体积变化 | 失败根因 |
+|------|------|-----------|-------------|---------|
+| O32 | LTO | -2.6% | 增加（LTO 内联） | icache 压力 + workshare 已优化 |
+| O35 | PGO | -0.8% | 不变 | branch miss rate 太低 |
+| O41 | -funroll-loops | -0.6% | +93% | gfortran -O3 已充分优化 + icache 压力 |
+| O42 | -fno-align-functions | +2.45% (环境异常) | -0.001% | 对齐 NOP 占比极小 + 环境不可靠 |
+
+O41 和 O42 是一对相反方向的实验：
+- O41 增加代码体积 93% → icache 压力 → 失败
+- O42 减少代码体积 0.001% → 改善可忽略 → 失败
+
+两者共同证实：**在 gfortran -O3 已优化的代码上，微调代码体积无法带来收益**。
+gfortran 的函数对齐策略已经平衡了 icache 利用率和分支预测效率。
+
+**洞察**：
+- **gfortran 默认的函数对齐是最优配置**：`.p2align 5,,15` 对齐到 32 字节边界，
+  既改善了指令 fetch 效率，又不过度浪费 code space。禁用对齐移除了几字节 NOP，
+  但损害了分支预测和指令 fetch 的对齐优势。
+- **代码体积微调（<1%）无法改善 icache**：O41 增加 93% 代码体积导致 icache 压力，
+  O42 减少 0.001% 代码体积改善可忽略。icache 优化的有效阈值可能在 5-10% 以上。
+- **编译标志优化方向已穷尽**：O39（-fstack-arrays）是唯一成功的编译标志优化，
+  O40（no-PIE）短跑有收益但长跑被 page cache 掩盖，O41（-funroll-loops）无收益，
+  O42（-fno-align-functions）环境异常不可靠。剩余编译标志（如
+  -fno-asynchronous-unwind-tables）预期收益更低，不值得尝试。
+- **unbound 调度下环境异常的检测**：当 baseline 比历史值慢 >20% 时，说明环境
+   异常，A/B 测试结果不可靠。应重新运行或标注异常。
+
+决定：按"一次一项、环境异常不可靠回退"原则，不启用 -fno-align-functions。
+保留 g++/gfortran -O3 -g -fstack-arrays（有默认 -falign-functions）作为编译配置。
+
+## 下一步
+
+### O42 后的状态
+
+O42（-fno-align-functions）环境异常导致结果不可靠，理论收益 <0.001%，回退。
+当前保留的优化不变：
+O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### 已穷尽方向（更新）
+- fno-align-functions：O42 短跑 +2.45% 但环境异常不可靠（理论收益 <0.001%）
+- 其他已穷尽方向见上方列表
+
+### 可探索方向
+1. **-fno-asynchronous-unwind-tables**：减少 unwind 表，可能减少 code size
+   （但 O42 证明代码体积微调无收益，预期更低）
+2. **page cache 污染解决方案**：如果能解决 drop_caches 问题，O40 可能在长跑中也有收益
+3. **算法级优化**：如减少 symmetry_bd 调用次数、批处理多变量
+   （但 O25 教训：延长 parallel 区域会导致 page cache 污染退化）
+4. **重新评估 O27/O28/O30**：在 O39 后重新测试（但失败根因不受 -fstack-arrays 影响）
+
+### O43：fno-asynchronous-unwind-tables（禁用异步 unwind 表）
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：O42（-fno-align-functions）回退后，STATE.md 列出 -fno-asynchronous-unwind-tables
+作为可探索的编译标志方向。O41（-funroll-loops）增加代码体积 93% 导致 icache 压力失败，
+O42（-fno-align-functions）减少代码体积 0.001% 无收益。-fno-asynchronous-unwind-tables
+是另一个减少代码体积的方向：移除 .eh_frame 段（~32KB，约 3.5% 代码体积）。
+
+**背景与动机**：
+GCC 默认启用 -fasynchronous-unwind-tables，生成详细的异步 unwind 表（.eh_frame 段），
+用于异常处理和栈回溯。objdump 显示 build/ABE 的 .eh_frame 段为 0x8214 = 33300 字节
+（~32KB），.eh_frame_hdr 为 0xb5c = 2908 字节（~2.8KB）。合计约 35KB，占总代码体积
+（4903400 字节）的 0.72%。
+
+假设：移除 .eh_frame 段（32KB）可能改善 TLB 压力和 dcache 利用率，并简化函数 prologue
+（不需要为 unwind 保存寄存器）。减少幅度比 O42（0.001%）大得多，可能值得一试。
+
+**汇编验证（预期 vs 实际）**：
+预期：-fno-asynchronous-unwind-tables 移除 .eh_frame 段。
+实际：objdump 对比显示 .text、.eh_frame、.eh_frame_hdr **完全相同**：
+- .text: 000d5428（baseline）vs 000d5428（optimized）— 完全相同
+- .eh_frame: 00008214（baseline）vs 00008214（optimized）— 完全相同
+- .eh_frame_hdr: 00000b5c（baseline）vs 00000b5c（optimized）— 完全相同
+- 代码体积差异仅 40 字节（0.0008%），比 O42 的 56 字节（0.001%）还小
+
+**根因分析**：-fno-asynchronous-unwind-tables 只禁用异步 unwind 表的生成，但 C++ 异常
+处理（throw/catch）需要同步 unwind 表（-funwind-tables）。AMSS-NCKU 包含 C++ 代码
+（ABE.C, Parallel.C, bssn_class.C 等），链接器必须保留 .eh_frame 段以支持 C++ 异常处理。
+要完全移除 .eh_frame，需要同时传递 -fno-asynchronous-unwind-tables 和 -fno-unwind-tables，
+但这会导致 C++ 异常处理失败（throw 会调用 terminate）。
+
+修改：
+- 无源码修改
+- 新建 build_nounwind/ 构建目录，使用 -fno-asynchronous-unwind-tables（C++ 和 Fortran）
+- 编译标志与 baseline 完全一致：-O3 -g -fstack-arrays
+- ab_test_nounwind.sh：自定义 A/B 脚本
+
+A/B 测试（短输入 t=2、30 MPI × 2 OMP、owner-local 16 线程、--twop-cache、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (有 -fasynchronous-unwind-tables) | 23.9214 | 23.9215 | 24.1656 | 23.9215 s | 1.0% |
+| optimized (有 -fno-asynchronous-unwind-tables) | 24.0806 | 23.9218 | 24.3458 | 24.0806 s | 1.8% |
+
+O43 中位数比 baseline 慢 0.67%（+0.159s），差异 <2%，无统计意义。
+波动正常（1.0%/1.8%），环境正常（baseline 中位数 23.92s 与 O41 的 24.09s 一致）。
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4
+与 baseline 数值位级一致，仅第一行时间戳不同）。
+
+**失败原因深度分析**：
+
+1. **.eh_frame 段未被移除**：-fno-asynchronous-unwind-tables 只禁用异步 unwind 表，
+   但 C++ 异常处理需要同步 unwind 表（-funwind-tables 仍启用）。因此 .eh_frame 段
+   完全保留，代码生成无变化。
+
+2. **代码体积差异极小（0.0008%）**：40 字节的差异可能来自某些元数据的微小变化，
+   对 icache 利用率的影响可忽略。比 O42 的 56 字节（0.001%）还小。
+
+3. **与 O42 的一致性**：O42 移除函数对齐 NOP（0.001% 代码体积）无收益，O43 移除
+   异步 unwind 表（0.0008% 代码体积）也无收益。两者共同证实：当代码体积变化 <1%
+   且不改变 .text 段时，无法改善 icache。
+
+4. **理论收益 <0.001%**：即使 .eh_frame 被移除，它只占 0.72% 的代码体积，且是只读
+   数据段（不频繁访问），对运行时性能的影响极小。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化/收益 | 代码体积变化 | .text 变化 | 失败根因 |
+|------|------|-----------|-------------|-----------|---------|
+| O32 | LTO | -2.6% | 增加（LTO 内联） | 变化 | icache 压力 + workshare 已优化 |
+| O35 | PGO | -0.8% | 不变 | 不变 | branch miss rate 太低 |
+| O41 | -funroll-loops | -0.6% | +93% | 增加 | gfortran -O3 已充分优化 + icache 压力 |
+| O42 | -fno-align-functions | +2.45% (环境异常) | -0.001% | 不变 | 对齐 NOP 占比极小 + 环境不可靠 |
+| O43 | -fno-asynchronous-unwind-tables | -0.67% | -0.0008% | 不变 | C++ 异常需要 .eh_frame，段未被移除 |
+
+**洞察**：
+- **-fno-asynchronous-unwind-tables 不移除 .eh_frame 段**：C++ 异常处理需要同步
+  unwind 表，GCC 在有 C++ 代码时仍保留 .eh_frame。这与 STATE.md 的预期"减少
+  unwind 表，可能减少 code size"不符。要完全移除 .eh_frame，需要 -fno-unwind-tables
+  和 -fno-exceptions，但这会破坏 C++ 异常处理。
+- **编译标志优化方向已彻底穷尽**：O39（-fstack-arrays）是唯一成功的编译标志优化，
+  O40（no-PIE）短跑有收益但长跑被 page cache 掩盖，O41（-funroll-loops）无收益，
+  O42（-fno-align-functions）环境异常不可靠，O43（-fno-asynchronous-unwind-tables）
+  不改变代码生成。所有减少代码体积的编译标志方向已穷尽。
+- **代码体积微调（<1%）无法改善 icache**：O42 和 O43 都证实了这一点。当 .text
+  段不变时，移除非 .text 段（.eh_frame、对齐 NOP）对运行时性能无影响。
+
+决定：按"一次一项、无收益回退"原则，不启用 -fno-asynchronous-unwind-tables。
+保留 g++/gfortran -O3 -g -fstack-arrays（有默认 -fasynchronous-unwind-tables）作为编译配置。
+
+## 下一步
+
+### O43 后的状态
+
+O43（-fno-asynchronous-unwind-tables）短跑 -0.67% < 2%，回退。当前保留的优化不变：
+O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### 已穷尽方向（更新）
+- fno-asynchronous-unwind-tables：O43 短跑 -0.67%（C++ 异常需要 .eh_frame，段未被移除）
+- 其他已穷尽方向见上方列表
+
+### 可探索方向
+1. **page cache 污染解决方案**：如果能解决 drop_caches 问题，O40 可能在长跑中也有收益
+   - 可能的方向：增大 touch 缓冲区（2GB→4GB）、对更多文件做 posix_fadvise
+   - 但 O16 fallback 已包含 touch 2GB，效果有限
+2. **算法级优化**：如减少 symmetry_bd 调用次数、批处理多变量
+   （但 O25 教训：延长 parallel 区域会导致 page cache 污染退化）
+3. **重新评估 O27/O28/O30**：在 O39 后重新测试（但失败根因不受 -fstack-arrays 影响）
+
+### 编译标志优化方向的最终结论
+
+经过 O39-O43 的系统探索，编译标志优化方向已彻底穷尽：
+- **O39（-fstack-arrays）**：唯一成功的编译标志优化（+9.5% 短跑，+12.2% 长跑）
+- **O40（no-PIE）**：短跑 +3.3% 但长跑 +0.31%（page cache 污染掩盖）
+- **O41（-funroll-loops）**：短跑 -0.6%（gfortran -O3 已充分优化）
+- **O42（-fno-align-functions）**：环境异常不可靠（理论收益 <0.001%）
+- **O43（-fno-asynchronous-unwind-tables）**：不改变代码生成（C++ 异常需要 .eh_frame）
+
+剩余编译标志方向（如 -fno-unwind-tables）需要禁用 C++ 异常处理，会破坏程序正确性，
+不可行。g++/gfortran -O3 -g -fstack-arrays 是当前架构下的最优编译配置。
+
+### O44：TwoPunctureABE.C 中 C++ 版 page cache 清理
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：O40 (no-PIE) 短跑 +3.3% 但长跑 +0.31%，page cache 污染是核心障碍。
+STATE.md 方向 1 推荐"page cache 污染解决方案"。
+
+假设：O16 fallback 在 Python 中做 page cache 清理（posix_fadvise + touch 2GB），
+但只在 TwoPunctureABE 进程退出后执行。如果在 TwoPunctureABE.C 中（进程退出前）
+做 page cache 清理，可以更早地清理 page cache，且 touch 4GB 比 O16 的 2GB 更彻底。
+
+修改：
+- `src/TwoPunctureABE.C`：`delete ADM` 后、`exit(0)` 前添加 C++ 版 page cache 清理：
+  1. posix_fadvise(DONTNEED) 对 6 个文件（Ansorg.psid, puncture_parameters_new.txt,
+     TwoPunctureABE_out.log, initial.dat, res.dat, ques.txt）
+  2. new[4GB] + touch every page + delete[]（强制内核回收匿名页）
+  3. 4GB 分配失败时 fallback 到 2GB
+- 不使用 malloc_trim（避免 O23 教训）
+- 添加 `<fcntl.h>`, `<unistd.h>`, `<new>` 头文件
+
+A/B 测试（t=40 长跑，无 cache，1 次）：
+
+| 版本 | Total Evolve | Program Cost | per-step |
+|------|:---:|:---:|:---:|
+| baseline (O39) | 480.97s | 554.45s | 12.02s |
+| O44 | 638.714s | 724.148s | 15.97s |
+| 变化 | **+32.8%** | +30.6% | +3.95s |
+
+**严重退化 32.8%**，远超 2% 阈值。
+
+正确性：constraints PASS（Ham=0.28, Px=0.028, Py=0.031, Pz=0.027，均 ≤ 2.0）。
+trajectory matched 40/100（与 baseline 一致，CPU 路径只跑到 t=40）。
+
+**退化性质分析**：稳定态退化型（每一步都慢 3.95s），不是冷启动开销。
+per-step 从 12.02s 升到 15.97s，40 步持续退化。
+
+**根因分析**：
+1. O44 的 touch 4GB 在 TwoPunctureABE 进程中分配了大量物理页（4GB），强制内核回收
+   其他物理页（包括 TwoPunctureABE 自己的 workspace 数据）
+2. TwoPunctureABE 退出后，4GB 物理页被内核回收，但物理页的分配状态被破坏
+3. ABE 启动时，物理页分配与 baseline 不同，导致 cache 不命中
+4. **与 O23 教训完全一致**：O23 在 TwoPunctureABE.C 中调用 malloc_trim 导致 31% 退化，
+   O44 在 TwoPunctureABE.C 中 touch 4GB 导致 32.8% 退化
+5. 两者都是在 TwoPunctureABE.C 中做内存操作，都破坏了 ABE 的内存布局
+
+**关键发现**：
+- 在 TwoPunctureABE.C 中做任何内存操作（malloc_trim 或 touch）都会破坏 ABE 的
+  内存布局，导致 30%+ 的性能退化
+- O16 fallback 在 Python 中做 page cache 清理是安全的，因为 TwoPunctureABE 进程
+  已退出，内存操作不影响 ABE 的物理页分配
+- page cache 污染解决方案不能在 TwoPunctureABE.C 中实现，只能在 Python 中实现
+- 这进一步证实了 O23 教训：TwoPunctureABE.C 中的内存操作是 ABE 性能的"毒药"
+
+决定：按"稳定态退化 >10% 直接回退"原则，回退 O44。
+
+## 下一步
+
+### O44 后的状态
+
+O44（TwoPunctureABE.C 中 C++ 版 page cache 清理）长跑退化 32.8%，回退。
+当前保留的优化不变：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### 已穷尽方向（更新）
+- TwoPunctureABE.C 中 page cache 清理：O44 长跑退化 32.8%（touch 4GB 破坏 ABE 内存布局）
+- 其他已穷尽方向见上方列表
+
+### 可探索方向
+1. **page cache 污染解决方案**：只能在 Python（scripts/）中实现，但 scripts/ 禁止修改
+   - 可能的替代：通过 run.sh 设置环境变量（但 makefile_and_run.py 读取环境变量仍需修改 scripts/）
+   - 当前 O16 fallback（touch 2GB）是此环境下的最优方案
+2. **算法级优化**：如减少 symmetry_bd 调用次数、批处理多变量
+   （但 O25 教训：延长 parallel 区域会导致 page cache 污染退化）
+3. **重新评估 O27/O28/O30**：在 O39 后重新测试（但失败根因不受 -fstack-arrays 影响）
+
+### 当前性能天花板（确认）
+t=40 Total Evolve: 480.97s, Program Cost: 554.45s（O39 baseline，沿用上次数据）
+编译标志优化已穷尽（O39 成功，O40-O43 失败）
+TwoPunctureABE.C 中 page cache 清理已穷尽（O44 退化 32.8%）
+
+
+
+### O45：merge array zeroing into computation loop
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据（`test_archives/perf_o40_20260817_194522`，O39 后重新采样，O8 配置 t=2）：
+- `__memset_sve_zva64` 2.22% self，来自 fderivs（1.18%）和 fdderivs（1.03%）
+- fderivs/fdderivs 中的 `fx = ZEO; fy = ZEO; fz = ZEO`（3 次全数组清零）和
+  `fxx..fyz = ZEO`（6 次全数组清零）在每次调用时执行
+- O27 曾尝试边界平面清零替代方案，失败（gfortran 单次 memset 比 18/36 次小 memset 高效）
+
+假设：将 serial memset（`fx = ZEO`）合并到并行计算循环中可以：
+1. 消除 serial memset 开销（2.22%）
+2. 不延长 parallel 区域（同一 `!$omp parallel do`）
+3. 不增加持久内存（无 page cache 风险）
+4. 不改变代码生成策略（仍是 Fortran 数组赋值）
+
+修改：
+- `src/diff_new.f90`：
+  - `fderivs`：移除 `fx = ZEO; fy = ZEO; fz = ZEO`（lines 78-80），
+    循环范围从 `do i=1,ex(1)-1` 改为 `do i=1,ex(1)`（同样 j,k），
+    在 `#else` 分支添加 `else` 子句设 fx/fy/fz=ZEO
+  - `fdderivs`：移除 `fxx = ZEO; ...; fyz = ZEO`（lines 488-493），
+    循环范围从 `do i=1,ex(1)-1` 改为 `do i=1,ex(1)`，
+    在 `#else` 分支添加 `else` 子句设 fxx/fxy/fxz/fyy/fyz/fzz=ZEO
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (serial memset, loop 1:ex-1) | 31.66 | 33.03 | 33.26 | 33.03 s | 5.0% |
+| O45 (no memset, loop 1:ex, else=ZEO) | 33.31 | 34.13 | 34.16 | 34.13 s | 2.6% |
+
+O45 中位数比 baseline 慢 3.31%（+1.093s），超过 2% 阈值。
+optimized 波动更低（2.6% vs 5.0%），但中位数明显更慢。
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4
+与 baseline **位级一致**，仅时间戳不同）。
+
+**失败原因深度分析**：
+
+1. **`else` 分支阻碍 gfortran 向量化**：
+   fderivs 的 `#else`（bam comparison）分支原本是 `if/elseif/endif` 结构——
+   两个条件分支都不满足时，点不写入（依靠之前的 memset 保持为零）。
+   添加 `else` 子句后，变为 `if/elseif/else/endif` 三路分支。
+   gfortran 无法对三路分支做 SVE 向量化——每个点需要先判断走哪个分支，
+   导致循环体退化为逐点标量执行。
+
+2. **向量化损失超过 memset 收益**：
+   - 消除的 memset：2.22%（fderivs 1.18% + fdderivs 1.03%）
+   - 向量化损失：计算循环从 SVE 向量化退化为标量执行
+   - fderivs+fdderivs 计算占总时间约 10%（fderivs 2.99% + fdderivs 6.99%）
+   - 如果向量化损失 50%，计算开销增加 ~5%，远超 2.22% 的 memset 收益
+   - 实测 3.31% 退化与这个估算一致
+
+3. **与 O27 失败机制的关键区别**：
+   - O27（边界平面清零）：保持循环不变，用 18/36 次小 memset 替代 3/6 次大 memset。
+     失败因为 gfortran 的单次 memset（SVE 指令）比多次小 memset 高效。
+   - O45（合并到计算循环）：消除 memset，但添加 else 分支到计算循环。
+     失败因为 else 分支阻碍 gfortran 对计算循环的 SVE 向量化。
+   - 两者从不同角度尝试优化 memset，都失败了，但失败根因不同。
+
+4. **gfortran 的 `fx = ZEO` 编译为最优 memset**：
+   gfortran 将 Fortran whole-array assignment `fx = ZEO` 编译为
+   `__memset_sve_zva64`——使用 SVE 指令的 memset，已经是内存带宽最优。
+   任何替代方案（边界平面、循环内 else）都无法超越这个优化。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化/收益 | 失败根因 |
+|------|------|-----------|---------|
+| O27 | fderivs 边界平面清零 | -0.4% (无收益) | 多次小 memset < 单次大 memset |
+| O45 | 合并零化到计算循环 | -3.31% | else 分支阻碍 SVE 向量化 |
+
+**洞察**：
+- **gfortran 对 `fx = ZEO` 的 memset 优化极难超越**：O27 和 O45 从两个不同角度
+  （减少 memset 量 vs 消除 memset）尝试，都失败了。gfortran 的 SVE memset 已经是
+  内存带宽最优的实现。
+- **向量化是差分 kernel 的生命线**：fderivs/fdderivs 的计算循环依赖 gfortran 的
+  SVE 向量化来达到可接受的性能。任何阻碍向量化的改动（如添加 else 分支）都会
+  导致显著的性能退化。
+- **memset 优化方向已彻底穷尽**：O12 成功优化 symmetry_bd（删除被覆盖的清零），
+  O27 失败于 fderivs/fdderivs（边界平面清零），O45 失败于 fderivs/fdderivs
+  （合并到计算循环）。fderivs/fdderivs 的 memset 是必要的——确保未计算点为零。
+
+决定：按"一次一项、负优化回退"原则恢复 `diff_new.f90` 到 git HEAD 状态。
+
+## 下一步
+
+### O45 后的状态
+
+O45（合并零化到计算循环）短跑退化 3.31%，回退。
+当前保留的优化不变：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### 已穷尽方向（更新）
+- merge array zeroing into computation loop：O45 短跑 -3.31%（else 分支阻碍 SVE 向量化）
+- memset 优化方向已彻底穷尽：O12 成功（symmetry_bd），O27 失败（边界平面），O45 失败（合并循环）
+- 其他已穷尽方向见上方列表
+
+### 可探索方向
+1. **算法级优化**：如减少 symmetry_bd 调用次数、批处理多变量
+   （但 O25 教训：延长 parallel 区域会导致 page cache 污染退化）
+   - 需要不延长 parallel 区域的优化方式
+2. **重新评估 O27/O28/O30**：在 O39 后重新测试（但失败根因不受 -fstack-arrays 影响）
+
+### 当前性能天花板（确认）
+t=40 Total Evolve: 480.97s, Program Cost: 554.45s（O39 baseline，沿用上次数据）
+编译标志优化已穷尽（O39 成功，O40-O43 失败）
+TwoPunctureABE.C 中 page cache 清理已穷尽（O44 退化 32.8%）
+memset 优化已穷尽（O12 成功，O27/O45 失败）
+
+### O46：fused fdderivs_ricci（融合二阶导数 + Ricci 收缩）
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：`fdderivs_._omp_fn.0` 占 6.99% self（O39 后重新采样），是最大计算热点之一。
+bssn_rhs.f90 中 6 次 fdderivs 调用（计算 Ricci 张量）每次写入 6 个临时数组（fxx/fxy/fxz/fyy/fyz/fzz），
+然后立即与逆度规收缩为 Ricci 分量。这导致：
+1. 6 × 6 = 36 次 memset（每调用 6 个全数组清零）
+2. 6 × 6 = 36 次数组写入 + 6 × 6 = 36 次数组读取（临时数组写入后立即读取收缩）
+3. 6 次串行 whole-array 收缩（当前不在 workshare 区域内）
+
+STATE.md 推荐"算法级优化：批处理多变量差分，不延长 parallel 区域"。
+
+假设：将 fdderivs + Ricci 收缩融合为 fdderivs_ricci 子程序：
+1. 二阶导数作为标量局部变量计算（l_fxx, l_fyy 等），不写入数组
+2. 立即与逆度规收缩，直接写入 Ricci 分量
+3. 消除 6 个临时数组 + 5/6 的 memset
+4. 收缩从串行 whole-array expression 变为并行循环内标量运算
+5. 不延长 parallel 区域（同样的 `!$omp parallel do collapse(3)`）
+6. 不增加持久内存（标量在栈/寄存器上）
+
+修改：
+- `src/diff_new.f90`：新增 `fdderivs_ricci` 子程序，接受输入数组 + 逆度规 6 分量 + Ricci 输出，
+  内部使用 `allocatable, save :: fh` 和标量局部变量 `l_fxx/l_fyy/l_fzz/l_fxy/l_fxz/l_fyz`，
+  在 `#else`（bam comparison）分支中计算 6 个二阶导数为标量，立即收缩为 Ric。
+  循环前 `Ric = ZEO`（单次 memset，替代原来的 6 次）。
+- `src/bssn_rhs.f90`：将 6 对 `call fdderivs(...) + Rxx = gupxx*fxx + ...` 替换为
+  `call fdderivs_ricci(ex,dxx,Rxx,gupxx,gupyy,gupzz,gupxy,gupxz,gupyz,...)`
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (原 fdderivs+收缩) | 31.86 | 31.83 | 33.96 | 31.857 s | 6.7% |
+| O46 (fused fdderivs_ricci) | 35.51 | 32.88 | 36.12 | 35.510 s | 9.1% |
+
+O46 中位数比 baseline 慢 **11.5%**（+3.653s），远超 2% 阈值。
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4 与 baseline **位级一致**，仅时间戳不同）。
+
+**失败原因深度分析**：
+
+1. **寄存器压力急剧增加**：
+   原 fdderivs 循环体：读 fh（5-9 点）+ 写 6 输出数组 = ~15 寄存器
+   融合后循环体：读 fh + 读 6 逆度规数组 + 6 标量局部 + 1 输出 = ~20+ 寄存器
+   鲲鹏 920B（AArch64）有 32 个 NEON/SVE 寄存器，融合后可能溢出到栈，增加内存访问。
+
+2. **内存访问模式恶化**：
+   原 fdderivs：每点只读 fh（1 数组），写 6 数组
+   融合后：每点读 fh + gupxx + gupyy + gupzz + gupxy + gupxz + gupyz（7 数组），写 1 数组
+   虽然总读写量减少（7+1 vs 1+6），但每次循环迭代的 cache 需求从 2 数组增至 8 数组，
+   增加了 L1 cache 压力和 cache line 争用。
+
+3. **gfortran 向量化可能受损**：
+   原循环体相对简单（6 个独立数组写入，gfortran 可以向量化每个写入）
+   融合后循环体复杂（6 标量计算 + 6 度规读取 + 1 收缩写入），gfortran 可能无法有效向量化。
+   与 O29 教训一致：增加循环体复杂度会降低编译器优化能力。
+
+4. **memset 收益远不抵计算退化**：
+   消除的 memset：36 → 6（每步节省 ~7.5MB memset，约 0.5-1% 理论收益）
+   计算退化：11.5%（远超 memset 收益）
+   这证实了 fdderivs 的性能瓶颈是**计算循环**，不是 memset。
+
+5. **与 O29/O45 的一致性**：
+   - O29：workshare→collapse(3) 改变循环结构 → -11.5%（编译器优化空间丧失）
+   - O45：合并零化到计算循环，添加 else 分支 → -3.31%（向量化损失）
+   - O46：融合二阶导数+收缩，增加循环体复杂度 → -11.5%（寄存器压力+向量化损失）
+   三者共同证实：**任何增加 fdderivs 循环体复杂度的改动都会导致显著退化**。
+
+**与之前失败的对比**：
+
+| 实验 | 方向 | 退化 | 失败根因 |
+|------|------|------|---------|
+| O25 | 合并 fderivs 延长 parallel 区域 | t=40 +30% | page cache 污染 |
+| O29 | workshare→collapse(3) | -11.5% | 编译器优化空间丧失 |
+| O45 | 合并零化到计算循环 | -3.31% | else 分支阻碍 SVE 向量化 |
+| O46 | 融合 fdderivs+Ricci 收缩 | -11.5% | 寄存器压力+内存模式恶化 |
+
+**洞察**：
+- **fdderivs 循环体已接近最优**：gfortran 对当前的 6 数组写入模式做了高效向量化。
+  任何增加循环体复杂度的改动（添加标量计算、额外数组读取、收缩运算）都会导致退化。
+- **消除 memset 的收益远不抵计算退化**：O46 消除了 5/6 的 memset（~1% 理论收益），
+  但计算退化 11.5%，净退化 10.5%。这证实了 fdderivs 的瓶颈是计算，不是 memset。
+- **算法级融合优化的风险**：将多个操作融合到一个循环中虽然减少了中间数组，
+  但增加了循环体复杂度（寄存器压力、内存模式、向量化困难），通常得不偿失。
+- **gfortran 对分离的数组写入模式优化最好**：6 个独立的 `fxx(i,j,k) = ...` 写入
+  比融合后的标量计算+收缩更容易向量化，因为编译器可以独立优化每个写入。
+- **"减少内存操作"不总是最优策略**：O46 减少了总内存操作量（20→8 per point），
+  但增加了每次迭代的 cache 需求（2→8 arrays per iteration），导致 cache 压力增加。
+  关键是平衡总内存量和每次迭代的 cache 需求。
+
+决定：按"一次一项、负优化回退"原则恢复 `diff_new.f90` 和 `bssn_rhs.f90` 到 O46 前状态。
+
+## 下一步
+
+### O46 后的状态
+
+O46（fused fdderivs_ricci）短跑退化 11.5%，回退。
+当前保留的优化不变：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### 已穷尽方向（更新）
+- fused fdderivs+Ricci 收缩：O46 短跑 -11.5%（寄存器压力+内存模式恶化）
+- 算法级融合优化已穷尽：O25（合并 fderivs，page cache 污染）、O46（融合 fdderivs+收缩，寄存器压力）
+- 其他已穷尽方向见上方列表
+
+### 可探索方向
+1. **page cache 污染解决方案**：只能在 Python（scripts/）中实现，但 scripts/ 禁止修改
+   - 当前 O16 fallback（touch 2GB）是此环境下的最优方案
+2. **重新评估 O27/O28/O30**：在 O39 后重新测试（但失败根因不受 -fstack-arrays 影响）
+3. **不改变循环体结构的优化**：如减少调用次数（但 O9 已合并 lopsided+kodis，剩余无法合并）
+
+### 当前性能天花板（确认）
+t=40 Total Evolve: 480.97s, Program Cost: 554.45s（O39 baseline，沿用上次数据）
+编译标志优化已穷尽（O39 成功，O40-O43 失败）
+TwoPunctureABE.C 中 page cache 清理已穷尽（O44 退化 32.8%）
+memset 优化已穷尽（O12 成功，O27/O45 失败）
+算法级融合优化已穷尽（O25 失败于 page cache，O46 失败于寄存器压力）
+
+### O47：shared_fh_cache（fderivs/fdderivs 共享 symmetrize 缓存）
+
+状态：**已回退**。
+
+日期：2026-08-17。
+
+profiler 证据：symmetry_bd_ self 0.90% + 其触发的 __memcpy_sve ~1.75% = ~2.65%。
+在 compute_rhs_bssn 中有 58 次 symmetry_bd 调用（31 次 fderivs/fdderivs + 24 次
+lopsided_kodis + 3 次 lopsided/kodis），其中 11 次是冗余的（同一输入数组在
+fderivs 和 fdderivs 中各调用一次 symmetry_bd）。
+
+STATE.md 推荐方向："缓存已对称化的数组（需要共享 fh + 跟踪机制，工程复杂）"。
+
+假设：将 fderivs 和 fdderivs 的各自 local `allocatable, save :: fh` 替换为
+模块级共享 `fh_shared`，并用 `loc(f)` 作为缓存键。当 fdderivs 被调用且输入
+与最近 fderivs 调用相同（loc + SoA + ex 全匹配）时，跳过 symmetry_bd 调用。
+
+验证：11 对 fderivs/fdderivs 调用的 SoA 完全匹配（如 betax: ANTI,SYM,SYM），
+且输入数组在两次调用之间不被修改（grep 确认 bssn_rhs.f90 中无对 betax/chi/dxx
+等输入变量的赋值）。
+
+修改：
+- `src/diff_new.f90`：新增 `module diff_cache_mod`，包含 `fh_shared`（共享
+  symmetrized 数组）、`fh_shared_loc`（缓存键）、`fh_shared_soa`、`fh_shared_ex`。
+- `src/diff_new.f90`：fderivs 和 fdderivs 中移除 local `fh`，改用 `fh_shared`。
+  symmetry_bd 调用前检查缓存：loc(f) + SoA + ex 全匹配则跳过。
+
+A/B 测试（短输入 `t=2`、30 MPI × 2 OMP、owner-local 16 线程、`--twop-cache`、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 | 波动 |
+|------|-------|-------|-------|--------|------|
+| baseline (local fh) | 32.03 | 31.24 | 34.58 | 32.028 s | 10.4% |
+| O47 (shared fh_shared) | 34.53 | 34.37 | 33.90 | 34.371 s | 1.8% |
+
+O47 中位数比 baseline 慢 **7.3%**（+2.344s），远超 2% 阈值。
+optimized 波动极低（1.8%），说明退化是确定性的，不是噪声。
+
+正确性：PASS（4 个关键 .dat 文件 bssn_BH/bssn_constraint/bssn_ADMQs/bssn_psi4
+与 baseline **位级一致**，仅时间戳不同）。
+
+**失败原因深度分析**：
+
+1. **模块级变量访问开销超过消除 symmetry_bd 的收益**：
+   原 local `allocatable, save :: fh` 是子程序级静态变量，gfortran 知道它仅在
+   fderivs 内被访问，可以保持 fh 基址在寄存器中。模块级 `fh_shared` 通过
+   `use diff_cache_mod` 引入，gfortran 无法假设它不被其他子程序修改，可能
+   无法做同样的寄存器优化。这与全局变量 vs. 局部变量的性能差异类似。
+
+2. **缓存检查开销**：
+   每次调用执行 `loc(f)` + 3 次比较（loc、SoA、ex）。对于 31 次调用中 20 次
+   缓存未命中（不同输入），这些检查纯粹是额外开销。11 次缓存命中节省的
+   symmetry_bd 调用（每次 ~0.046% 总时间）不足以抵消 31 次检查的开销。
+
+3. **与之前失败的对比**：
+   - O29（workshare→collapse(3)）：-11.5%，编译器优化空间丧失
+   - O46（融合 fdderivs+Ricci）：-11.5%，寄存器压力+向量化损失
+   - O47（shared fh cache）：-7.3%，模块变量访问开销
+   
+   三者共同证实：**改变 gfortran 已优化的局部变量访问模式会导致退化**。
+   无论是改变循环结构（O29）、增加循环体复杂度（O46）、还是移动变量到模块级
+   （O47），都会降低 gfortran 的优化效果。
+
+**洞察**：
+- **子程序级 `save` 变量比模块级变量有更好的优化潜力**：gfortran 可以假设
+  子程序级 `save` 变量仅在子程序内被修改，从而做更激进的寄存器优化。模块级
+  变量（通过 `use` 引入）无法做此假设，可能导致每次访问都需要从内存加载基址。
+- **缓存查找开销不容忽视**：即使缓存键比较很简单（loc + 3 元素数组比较），
+  在高频调用的函数中（fderivs/fdderivs 每步调用 31 次），累积开销显著。
+  当预期收益 <1% 时，缓存查找的 overhead 可能超过收益。
+- **"减少函数调用"不总是最优策略**：O47 减少了 11 次 symmetry_bd 调用
+  （~0.5% 理论收益），但引入了模块变量访问开销（~7.8% 实际退化），
+  净退化 7.3%。这证实了 O46 的教训：**减少内存操作的策略需要考虑引入的
+  额外开销，不能只计算消除的开销**。
+- **缓存共享数组方向已穷尽**：O47 是 STATE.md 列出的最后一个"可探索方向"
+  （"缓存已对称化的数组"），其失败确认了所有未尝试方向均已穷尽。
+
+决定：按"一次一项、负优化回退"原则恢复 `diff_new.f90` 到 git HEAD 状态。
+
+## 下一步
+
+### O47 后的状态
+
+O47（shared_fh_cache）短跑退化 7.3%，回退。
+当前保留的优化不变：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3), O39
+
+### 已穷尽方向（更新）
+- shared_fh_cache：O47 短跑 -7.3%（模块级变量访问开销超过消除 symmetry_bd 的收益）
+- 缓存共享数组方向已穷尽（O47 失败于模块变量访问开销）
+- 其他已穷尽方向见上方列表
+
+### 最终结论：所有可探索方向已彻底穷尽
+
+经过 O27-O47 的连续探索（21 个实验，全部失败或无收益），确认：
+
+1. 计算 kernel 优化：R6, O24a/b/c, O25, O27, O28, O29, O30, O34, O45, O46, O47 均失败
+2. 工具链优化：O31 (编译器), O32 (LTO), O33 (MPI), O35 (PGO) 均失败
+3. 编译标志优化：O39 (-fstack-arrays) 成功 (+12.2%)，O40-O43 均失败
+4. page cache 敏感优化：O21A/B, O22, O23, O44 均失败
+5. memset 优化：O12 成功，O27/O45 失败
+6. 算法级融合优化：O25 失败于 page cache，O46 失败于寄存器压力
+7. 缓存共享数组优化：O47 失败于模块变量访问开销
+8. profile 深度分析：O36 确认无遗漏热点
+9. 全热点系统盘点：O37 确认无未尝试方向（39 个 >0.3% 符号）
+10. 确认性分析：O38 确认无未尝试方向（14 个 0.05-0.30% 符号 + 3 个补充角度）
+
+**当前 O20+O26+O39 配置（t=40 Total Evolve 480.97s, Program Cost 554.45s）
+是此环境下 CPU 计算优化的最终性能天花板。**

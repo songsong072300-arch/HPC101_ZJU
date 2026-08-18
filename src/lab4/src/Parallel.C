@@ -3099,6 +3099,43 @@ double Parallel::L2Norm(Patch *Pat, var *vf)
 
     return tvf;
 }
+
+// E3: Batch L2Norm for 7 variables — 1 Allreduce instead of 7
+void Parallel::L2Norm_7(Patch *Pat, var *v0, var *v1, var *v2, var *v3, var *v4, var *v5, var *v6, double *out)
+{
+    int myrank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+
+    int BDW = ghost_width;
+    double dtvf[7] = {0,0,0,0,0,0,0};
+    double tvf[7];
+    var *vars[7] = {v0, v1, v2, v3, v4, v5, v6};
+
+    MyList<Block> *BP = Pat->blb;
+    while (BP)
+    {
+        Block *cg = BP->data;
+        if (myrank == cg->rank)
+        {
+            for (int k = 0; k < 7; k++)
+            {
+                f_l2normhelper(cg->shape, cg->X[0], cg->X[1], cg->X[2],
+                               Pat->bbox[0], Pat->bbox[1], Pat->bbox[2],
+                               Pat->bbox[3], Pat->bbox[4], Pat->bbox[5],
+                               cg->fgfs[vars[k]->sgfn], tvf[k], BDW);
+                dtvf[k] += tvf[k];
+            }
+        }
+        if (BP == Pat->ble)
+            break;
+        BP = BP->next;
+    }
+
+    MPI_Allreduce(dtvf, tvf, 7, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+    for (int k = 0; k < 7; k++)
+        out[k] = sqrt(tvf[k]);
+}
 double Parallel::L2Norm(Patch *Pat, var *vf, MPI_Comm Comm_here)
 {
     int myrank;

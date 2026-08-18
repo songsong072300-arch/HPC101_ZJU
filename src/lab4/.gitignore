@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build_*/
 
 # Python
 __pycache__/
@@ -52,9 +53,20 @@ golden_cpu/
 !README.md
 ques.txt
 image.png
+image-1.png
 prompt/
 baseline_run.sh
 profile_abe.sh
 perf_analysis.sh
+perf_analysis*.sh
 quick_test.sh
 test_*.sh
+ab_test*.sh
+full_test*.sh
+_*.sh
+*_diag.sh
+rank_test.sh
+t_test.sh
+
+# Profiler / analysis output files
+src/opt.txt
