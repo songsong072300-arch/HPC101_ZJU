@@ -23,6 +23,16 @@ using namespace std;
 
 namespace Parallel
 {
+    struct CommDiagnostics
+    {
+        long long wait_calls;
+        long long requests;
+        long long elements;
+        double wait_total;
+        double wait_max;
+    };
+    void reset_comm_diagnostics();
+    CommDiagnostics get_comm_diagnostics();
     struct gridseg
     {
         double llb[dim];

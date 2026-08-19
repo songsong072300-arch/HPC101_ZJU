@@ -5,6 +5,43 @@
 #include "misc.h"
 #include "parameters.h"
 
+#include <cstring>
+
+namespace {
+bool mpi_diagnostics_enabled()
+{
+    static const bool enabled = [] {
+        const char *value = getenv("AMSS_MPI_DIAGNOSTICS");
+        return value != nullptr && strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+Parallel::CommDiagnostics comm_diagnostics = {0, 0, 0, 0.0, 0.0};
+
+void record_waitall(int requests, long long elements, double elapsed)
+{
+    if (!mpi_diagnostics_enabled())
+        return;
+    comm_diagnostics.wait_calls++;
+    comm_diagnostics.requests += requests;
+    comm_diagnostics.elements += elements;
+    comm_diagnostics.wait_total += elapsed;
+    if (elapsed > comm_diagnostics.wait_max)
+        comm_diagnostics.wait_max = elapsed;
+}
+}
+
+void Parallel::reset_comm_diagnostics()
+{
+    comm_diagnostics = {0, 0, 0, 0.0, 0.0};
+}
+
+Parallel::CommDiagnostics Parallel::get_comm_diagnostics()
+{
+    return comm_diagnostics;
+}
+
 #ifdef USE_GPU
 #include "gpu_manager.h"
 #include "helper.h"
@@ -2530,6 +2567,7 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
         reqs_size = 2 * cpusize;
     }
     int req_no = 0;
+    long long diagnostic_elements = 0;
 
     double **send_data, **rec_data;
     send_data = new double *[cpusize];
@@ -2565,6 +2603,7 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
                 }
                 data_packer(send_data[node], src[myrank], dst[myrank], node, PACK, VarList1, VarList2, Symmetry);
                 MPI_Isend((void *)send_data[node], length, MPI_DOUBLE, node, 1, MPI_COMM_WORLD, reqs + req_no++);
+                if (mpi_diagnostics_enabled()) diagnostic_elements += length;
             }
             // receive from cpu#node to this cpu
             if (length = data_packer(0, src[node], dst[node], node, UNPACK, VarList1, VarList2, Symmetry))
@@ -2576,11 +2615,15 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
                     MPI_Abort(MPI_COMM_WORLD, 1);
                 }
                 MPI_Irecv((void *)rec_data[node], length, MPI_DOUBLE, node, 1, MPI_COMM_WORLD, reqs + req_no++);
+                if (mpi_diagnostics_enabled()) diagnostic_elements += length;
             }
         }
     }
     // wait for all requests to complete
+    double wait_start = mpi_diagnostics_enabled() ? MPI_Wtime() : 0.0;
     MPI_Waitall(req_no, reqs, stats);
+    if (mpi_diagnostics_enabled())
+        record_waitall(req_no, diagnostic_elements, MPI_Wtime() - wait_start);
 
     for (node = 0; node < cpusize; node++)
         if (rec_data[node])
@@ -2620,6 +2663,7 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
         reqs_size = 2 * cpusize;
     }
     int req_no = 0;
+    long long diagnostic_elements = 0;
 
     double **send_data, **rec_data;
     send_data = new double *[cpusize];
@@ -2655,6 +2699,7 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
                 }
                 data_packermix(send_data[node], src[myrank], dst[myrank], node, PACK, VarList1, VarList2, Symmetry);
                 MPI_Isend((void *)send_data[node], length, MPI_DOUBLE, node, 1, MPI_COMM_WORLD, reqs + req_no++);
+                if (mpi_diagnostics_enabled()) diagnostic_elements += length;
             }
             // receive from cpu#node to this cpu
             if (length = data_packermix(0, src[node], dst[node], node, UNPACK, VarList1, VarList2, Symmetry))
@@ -2666,11 +2711,15 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
                     MPI_Abort(MPI_COMM_WORLD, 1);
                 }
                 MPI_Irecv((void *)rec_data[node], length, MPI_DOUBLE, node, 1, MPI_COMM_WORLD, reqs + req_no++);
+                if (mpi_diagnostics_enabled()) diagnostic_elements += length;
             }
         }
     }
     // wait for all requests to complete
+    double wait_start = mpi_diagnostics_enabled() ? MPI_Wtime() : 0.0;
     MPI_Waitall(req_no, reqs, stats);
+    if (mpi_diagnostics_enabled())
+        record_waitall(req_no, diagnostic_elements, MPI_Wtime() - wait_start);
 
     for (node = 0; node < cpusize; node++)
         if (rec_data[node])

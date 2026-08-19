@@ -5,6 +5,7 @@
 #include <string>
 #include <cstring> 
 #include <iostream>
+#include <cstdlib>
 using namespace std;
 
 #include <time.h>
@@ -27,6 +28,158 @@ using namespace std;
 #include "perf.h"
 
 #include "derivatives.h"
+
+namespace {
+bool diagnostic_flag(const char *name)
+{
+  const char *value = getenv(name);
+  return value != nullptr && strcmp(value, "0") != 0;
+}
+
+bool phase_timing_enabled()
+{
+  static const bool enabled = diagnostic_flag("AMSS_PHASE_TIMING");
+  return enabled;
+}
+
+bool mpi_diagnostics_enabled()
+{
+  static const bool enabled = diagnostic_flag("AMSS_MPI_DIAGNOSTICS");
+  return enabled;
+}
+
+struct CgroupCpuStats
+{
+  long long usage_usec;
+  long long user_usec;
+  long long system_usec;
+  long long nr_periods;
+  long long nr_throttled;
+  long long throttled_usec;
+  bool valid;
+};
+
+CgroupCpuStats empty_cgroup_cpu_stats()
+{
+  CgroupCpuStats stats = {0, 0, 0, 0, 0, 0, false};
+  return stats;
+}
+
+CgroupCpuStats read_cgroup_cpu_stats()
+{
+  CgroupCpuStats stats = empty_cgroup_cpu_stats();
+  ifstream input("/sys/fs/cgroup/cpu.stat");
+  if (!input)
+    input.open("/sys/fs/cgroup/cpu/cpu.stat");
+  if (!input)
+    return stats;
+
+  string key;
+  long long value;
+  while (input >> key >> value)
+  {
+    if (key == "usage_usec") stats.usage_usec = value;
+    else if (key == "user_usec") stats.user_usec = value;
+    else if (key == "system_usec") stats.system_usec = value;
+    else if (key == "nr_periods") stats.nr_periods = value;
+    else if (key == "nr_throttled") stats.nr_throttled = value;
+    else if (key == "throttled_usec") stats.throttled_usec = value;
+    else if (key == "throttled_time") stats.throttled_usec = value / 1000;
+  }
+  stats.valid = true;
+  return stats;
+}
+
+void report_cpu_timing(int step, double cpu_elapsed, double wall_elapsed,
+                       int myrank, int nprocs)
+{
+  if (!phase_timing_enabled())
+    return;
+
+  double cpu_min = 0.0, cpu_sum = 0.0;
+  struct { double value; int rank; } local_max = {cpu_elapsed, myrank};
+  struct { double value; int rank; } global_max = {0.0, 0};
+  MPI_Reduce(&cpu_elapsed, &cpu_min, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&cpu_elapsed, &cpu_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local_max, &global_max, 1, MPI_DOUBLE_INT, MPI_MAXLOC, 0, MPI_COMM_WORLD);
+  if (myrank == 0)
+  {
+    cout << " MPI rank CPU timing: step=" << step
+         << " cpu_min=" << cpu_min << " cpu_avg=" << cpu_sum / nprocs
+         << " cpu_max=" << global_max.value << " max_rank=" << global_max.rank
+         << " cpu_sum=" << cpu_sum << " iteration_wall=" << wall_elapsed << endl;
+  }
+}
+
+void report_cgroup_cpu_stats(int step, const CgroupCpuStats &start,
+                             const CgroupCpuStats &end, int myrank)
+{
+  if (!phase_timing_enabled() || myrank != 0 || !start.valid || !end.valid)
+    return;
+
+  cout << " CPU cgroup delta: step=" << step << " scope=iteration"
+       << " usage_s=" << (end.usage_usec - start.usage_usec) / 1.0e6
+       << " user_s=" << (end.user_usec - start.user_usec) / 1.0e6
+       << " system_s=" << (end.system_usec - start.system_usec) / 1.0e6
+       << " periods=" << end.nr_periods - start.nr_periods
+       << " throttled_periods=" << end.nr_throttled - start.nr_throttled
+       << " throttled_s=" << (end.throttled_usec - start.throttled_usec) / 1.0e6
+       << endl;
+}
+
+void report_phase_timing(const char *name, int step, double elapsed, int myrank, int nprocs)
+{
+  if (!phase_timing_enabled())
+    return;
+
+  double min_elapsed = 0.0, sum_elapsed = 0.0, max_elapsed = 0.0;
+  struct { double value; int rank; } local_max = {elapsed, myrank}, global_max = {0.0, 0};
+  MPI_Reduce(&elapsed, &min_elapsed, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&elapsed, &sum_elapsed, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local_max, &global_max, 1, MPI_DOUBLE_INT, MPI_MAXLOC, 0, MPI_COMM_WORLD);
+  max_elapsed = global_max.value;
+  if (myrank == 0)
+  {
+    const double avg_elapsed = sum_elapsed / nprocs;
+    const double imbalance = avg_elapsed > 0.0 ? max_elapsed / avg_elapsed : 0.0;
+    cout << " MPI phase timing: step=" << step << " phase=" << name
+         << " wall_min=" << min_elapsed << " wall_avg=" << avg_elapsed
+         << " wall_max=" << max_elapsed << " max_rank=" << global_max.rank
+         << " imbalance=" << imbalance << endl;
+  }
+}
+
+void report_comm_diagnostics(int step, int myrank, int nprocs)
+{
+  if (!mpi_diagnostics_enabled())
+    return;
+
+  Parallel::CommDiagnostics local = Parallel::get_comm_diagnostics();
+  double wait_min = 0.0, wait_sum = 0.0;
+  struct { double value; int rank; } local_wait = {local.wait_total, myrank};
+  struct { double value; int rank; } max_wait = {0.0, 0};
+  long long calls_min = 0, calls_max = 0, requests_sum = 0, elements_sum = 0;
+  double longest_wait = 0.0;
+  MPI_Reduce(&local.wait_total, &wait_min, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local.wait_total, &wait_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local_wait, &max_wait, 1, MPI_DOUBLE_INT, MPI_MAXLOC, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local.wait_calls, &calls_min, 1, MPI_LONG_LONG, MPI_MIN, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local.wait_calls, &calls_max, 1, MPI_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local.requests, &requests_sum, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local.elements, &elements_sum, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local.wait_max, &longest_wait, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  if (myrank == 0)
+  {
+    cout << " MPI wait summary: step=" << step
+         << " calls_min=" << calls_min << " calls_max=" << calls_max
+         << " requests_sum=" << requests_sum
+         << " volume_sum_MiB=" << (elements_sum * sizeof(double) / 1048576.0)
+         << " wait_min=" << wait_min << " wait_avg=" << wait_sum / nprocs
+         << " wait_max=" << max_wait.value << " max_rank=" << max_wait.rank
+         << " longest_call=" << longest_wait << endl;
+  }
+}
+}
 
 //================================================================================================
 
@@ -1554,17 +1707,39 @@ void bssn_class::Evolve(int Steps)
 
   for (int ncount = 1; ncount < Steps + 1; ncount++)
   {
+    const bool detailed_timing = phase_timing_enabled() || mpi_diagnostics_enabled();
+    const double step_start = detailed_timing ? MPI_Wtime() : 0.0;
+    const clock_t rank_cpu_start = phase_timing_enabled() ? clock() : 0;
+    const CgroupCpuStats cgroup_start =
+        phase_timing_enabled() && myrank == 0 ? read_cgroup_cpu_stats()
+                                               : empty_cgroup_cpu_stats();
+    if (mpi_diagnostics_enabled())
+      Parallel::reset_comm_diagnostics();
     // special for large mass ratio consideration
     //     if(fabs(Porg0[0][0]-Porg0[1][0])+fabs(Porg0[0][1]-Porg0[1][1])+fabs(Porg0[0][2]-Porg0[1][2])<1e-6) 
     //     { GH->levels=GH->movls; }
 
     if (myrank == 0)
       curr_clock = clock();
+    double phase_start = phase_timing_enabled() ? MPI_Wtime() : 0.0;
     RecursiveStep(0);
+    report_phase_timing("RecursiveStep", ncount,
+                        phase_timing_enabled() ? MPI_Wtime() - phase_start : 0.0,
+                        myrank, nprocs);
 
     // misc::tillherecheck("before Constraint_Out");
 
+    phase_start = phase_timing_enabled() ? MPI_Wtime() : 0.0;
     Constraint_Out(); // this will affect the Dump_List
+    report_phase_timing("Constraint_Out", ncount,
+                        phase_timing_enabled() ? MPI_Wtime() - phase_start : 0.0,
+                        myrank, nprocs);
+
+    const double step_wall = detailed_timing ? MPI_Wtime() - step_start : 0.0;
+    report_phase_timing("StepBody", ncount, step_wall, myrank, nprocs);
+    report_comm_diagnostics(ncount, myrank, nprocs);
+
+    phase_start = phase_timing_enabled() ? MPI_Wtime() : 0.0;
 
     LastDump += dT_mon;
     Last2dDump += dT_mon;
@@ -1602,14 +1777,21 @@ void bssn_class::Evolve(int Steps)
       }
     }
 
+    report_phase_timing("OutputData", ncount,
+                        phase_timing_enabled() ? MPI_Wtime() - phase_start : 0.0,
+                        myrank, nprocs);
+
     if (myrank == 0)
     {
       prev_clock = curr_clock;
       curr_clock = clock();
       cout << endl;
       cout << " Timestep # " << ncount << ": integrating to time: " << PhysTime << "   "
-           << " Computer used " << (double)(curr_clock - prev_clock) / ((double)CLOCKS_PER_SEC) 
-           << " seconds! " << endl;
+           << " Computer used " << (double)(curr_clock - prev_clock) / ((double)CLOCKS_PER_SEC)
+           << " seconds!";
+      if (detailed_timing)
+        cout << " Body wall " << step_wall << " seconds!";
+      cout << endl;
       // cout << endl;
     }
 
@@ -1617,6 +1799,7 @@ void bssn_class::Evolve(int Steps)
       break;
 
     // Retrieve memory usage information used during computation; master process prints it
+    phase_start = phase_timing_enabled() ? MPI_Wtime() : 0.0;
     bssn_perf.MemoryUsage(&current_min, &current_avg, &current_max,
                           &peak_min, &peak_avg, &peak_max, nprocs);
     if (myrank == 0)
@@ -1631,7 +1814,11 @@ void bssn_class::Evolve(int Steps)
              (double)peak_max / (1024.0 * 1024.0));
       cout << endl;
     }
-    
+    report_phase_timing("MemoryUsage", ncount,
+                        phase_timing_enabled() ? MPI_Wtime() - phase_start : 0.0,
+                        myrank, nprocs);
+
+    phase_start = phase_timing_enabled() ? MPI_Wtime() : 0.0;
     // Output puncture positions at each step
     if (myrank == 0)
     {
@@ -1675,17 +1862,37 @@ void bssn_class::Evolve(int Steps)
         // MPI_Finalize();
     }
         
+    report_phase_timing("StatusAndAbort", ncount,
+                        phase_timing_enabled() ? MPI_Wtime() - phase_start : 0.0,
+                        myrank, nprocs);
+
     ////////////////////////////////////////////////////////////
 
     // When LastCheck >= CheckTime, perform runtime checks and output status data
     if (LastCheck >= CheckTime)
     {
+      phase_start = phase_timing_enabled() ? MPI_Wtime() : 0.0;
       LastCheck = 0;
 
       CheckPoint->write_Black_Hole_position(BH_num_input, BH_num, Porg0, Porgbr, Mass);
       CheckPoint->writecheck_cgh(PhysTime, GH);
       CheckPoint->write_bssn(LastDump, Last2dDump, LastAnas);
+      report_phase_timing("Checkpoint", ncount,
+                          phase_timing_enabled() ? MPI_Wtime() - phase_start : 0.0,
+                          myrank, nprocs);
     }
+
+    const double iteration_wall = detailed_timing ? MPI_Wtime() - step_start : 0.0;
+    report_phase_timing("IterationTotal", ncount, iteration_wall, myrank, nprocs);
+    report_cpu_timing(ncount,
+                      phase_timing_enabled()
+                          ? (double)(clock() - rank_cpu_start) / CLOCKS_PER_SEC
+                          : 0.0,
+                      iteration_wall, myrank, nprocs);
+    const CgroupCpuStats cgroup_end =
+        phase_timing_enabled() && myrank == 0 ? read_cgroup_cpu_stats()
+                                               : empty_cgroup_cpu_stats();
+    report_cgroup_cpu_stats(ncount, cgroup_start, cgroup_end, myrank);
   }
 }
 
@@ -2939,6 +3146,8 @@ void bssn_class::AnalysisStuff(int lev, double dT_lev)
 
   if (LastAnas >= AnasTime)
   {
+    static int analysis_count = 0;
+    double phase_start = phase_timing_enabled() ? MPI_Wtime() : 0.0;
     Compute_Psi4(lev);
     double *RP, *IP, *RoutMAP;
     int NN = 0;
@@ -2983,6 +3192,9 @@ void bssn_class::AnalysisStuff(int lev, double dT_lev)
     }
 
     LastAnas = 0;
+    report_phase_timing("AnalysisStuff", ++analysis_count,
+                        phase_timing_enabled() ? MPI_Wtime() - phase_start : 0.0,
+                        myrank, nprocs);
   }
 }
 

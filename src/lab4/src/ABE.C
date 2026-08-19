@@ -6,6 +6,12 @@
 #include <string>
 #include <cmath>
 #include <map>
+#include <cstring>
+#include <sched.h>
+#include <unistd.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 using namespace std;
 
 #include <mpi.h>
@@ -18,6 +24,22 @@ using namespace std;
 #else
 #include "bssn_class.h"
 #endif
+
+namespace {
+const char *env_or_unset(const char *name)
+{
+      const char *value = getenv(name);
+      return value != nullptr ? value : "<unset>";
+}
+
+bool diagnostics_enabled()
+{
+      const char *phase = getenv("AMSS_PHASE_TIMING");
+      const char *mpi = getenv("AMSS_MPI_DIAGNOSTICS");
+      return (phase != nullptr && strcmp(phase, "0") != 0) ||
+             (mpi != nullptr && strcmp(mpi, "0") != 0);
+}
+}
 
 namespace parameters
 {
@@ -48,8 +70,57 @@ int main(int argc, char *argv[])
       MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
       MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
       if (myrank == 0)
-            cout << " MPI transport: btl=" << getenv("OMPI_MCA_btl")
-                 << " backing=" << getenv("OMPI_MCA_btl_sm_backing_directory") << endl;
+            cout << " MPI transport: btl=" << env_or_unset("OMPI_MCA_btl")
+                 << " sm_backing=" << env_or_unset("OMPI_MCA_btl_sm_backing_directory")
+                 << " vader_backing=" << env_or_unset("OMPI_MCA_btl_vader_backing_directory") << endl;
+
+      if (diagnostics_enabled())
+      {
+            char mpi_version[MPI_MAX_LIBRARY_VERSION_STRING];
+            int mpi_version_len = 0;
+            MPI_Get_library_version(mpi_version, &mpi_version_len);
+            char processor[MPI_MAX_PROCESSOR_NAME];
+            int processor_len = 0;
+            MPI_Get_processor_name(processor, &processor_len);
+            int current_cpu = sched_getcpu();
+            cpu_set_t affinity;
+            CPU_ZERO(&affinity);
+            int affinity_count = -1;
+            if (sched_getaffinity(0, sizeof(affinity), &affinity) == 0)
+                  affinity_count = CPU_COUNT(&affinity);
+            int max_threads = 1;
+#ifdef _OPENMP
+            max_threads = omp_get_max_threads();
+#endif
+            int *rank_cpus = myrank == 0 ? new int[nprocs] : nullptr;
+            int *rank_affinity = myrank == 0 ? new int[nprocs] : nullptr;
+            MPI_Gather(&current_cpu, 1, MPI_INT, rank_cpus, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            MPI_Gather(&affinity_count, 1, MPI_INT, rank_affinity, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (myrank == 0)
+            {
+                  while (mpi_version_len > 0 && mpi_version[mpi_version_len - 1] == 0)
+                        --mpi_version_len;
+                  cout << " MPI diagnostics: library="
+                       << string(mpi_version, mpi_version_len) << endl;
+                  cout << " MPI diagnostics: ranks=" << nprocs
+                       << " host=" << string(processor, processor_len)
+                       << " omp_max_threads=" << max_threads << endl;
+                  cout << " MPI diagnostics: OMP_NUM_THREADS=" << env_or_unset("OMP_NUM_THREADS")
+                       << " OMP_PROC_BIND=" << env_or_unset("OMP_PROC_BIND")
+                       << " OMP_PLACES=" << env_or_unset("OMP_PLACES") << endl;
+                  cout << " MPI diagnostics: mpi_yield_when_idle="
+                       << env_or_unset("OMPI_MCA_mpi_yield_when_idle")
+                       << " phase_timing=" << env_or_unset("AMSS_PHASE_TIMING")
+                       << " mpi_diagnostics=" << env_or_unset("AMSS_MPI_DIAGNOSTICS") << endl;
+                  cout << " MPI rank placement:";
+                  for (int rank = 0; rank < nprocs; rank++)
+                        cout << " " << rank << ":cpu" << rank_cpus[rank]
+                             << "/aff" << rank_affinity[rank];
+                  cout << endl;
+                  delete[] rank_cpus;
+                  delete[] rank_affinity;
+            }
+      }
 
       double Begin_clock, End_clock;
       if (myrank == 0)

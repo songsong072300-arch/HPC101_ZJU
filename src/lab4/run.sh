@@ -11,6 +11,8 @@
 #   AMSS_TWOP_OMP_THREADS  OpenMP threads for TwoPuncture (default: 30, O1)
 #   AMSS_SURFACE_COLLECTIVE  owner_local (default), allreduce, or reduce_scatter
 #   AMSS_SURFACE_OMP_THREADS  threads for owner-local surface interp (default: 16, O8)
+#   AMSS_PHASE_TIMING        per-step wall/CPU/cgroup timing diagnostics (default: 1)
+#   AMSS_MPI_DIAGNOSTICS     per-step MPI Waitall diagnostics (default: 1)
 set -euo pipefail
 
 # Ansorg-TwoPuncture allocates large Fortran automatic arrays.
@@ -65,6 +67,10 @@ export AMSS_ABE_OMP_THREADS="2"
 export AMSS_TWOP_OMP_THREADS="30"
 export AMSS_SURFACE_COLLECTIVE="owner_local"
 export AMSS_SURFACE_OMP_THREADS="16"
+# Keep these enabled for the OJ diagnostic submission. Set either variable to
+# 0 explicitly after the timing problem has been identified.
+export AMSS_PHASE_TIMING="${AMSS_PHASE_TIMING:-1}"
+export AMSS_MPI_DIAGNOSTICS="${AMSS_MPI_DIAGNOSTICS:-1}"
 # 强制覆盖 OJ 注入的 OpenMP 绑定设置（unbound 调度需要）
 export OMP_PROC_BIND="false"
 export OMP_DYNAMIC="FALSE"
@@ -107,6 +113,7 @@ echo "==> Build    : $AMSS_BUILD_DIR"
 echo "==> Output   : $AMSS_OUTPUT_ROOT"
 echo "==> Cache    : $AMSS_CACHE_DIR"
 echo "==> MPI exec : $AMSS_MPIEXEC"
+echo "==> Diagnostics: phase=$AMSS_PHASE_TIMING mpi=$AMSS_MPI_DIAGNOSTICS"
 
 # Diagnostic: print OpenMPI version and available BTLs
 echo "==> OpenMPI version: $(mpiexec --version 2>&1 | head -1)"
@@ -130,6 +137,8 @@ exec env \
   AMSS_TWOP_OMP_THREADS="$AMSS_TWOP_OMP_THREADS" \
   AMSS_SURFACE_COLLECTIVE="$AMSS_SURFACE_COLLECTIVE" \
   AMSS_SURFACE_OMP_THREADS="$AMSS_SURFACE_OMP_THREADS" \
+  AMSS_PHASE_TIMING="$AMSS_PHASE_TIMING" \
+  AMSS_MPI_DIAGNOSTICS="$AMSS_MPI_DIAGNOSTICS" \
   OMPI_ALLOW_RUN_AS_ROOT="$OMPI_ALLOW_RUN_AS_ROOT" \
   OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="$OMPI_ALLOW_RUN_AS_ROOT_CONFIRM" \
   PRTE_MCA_hwloc_default_binding_policy="$PRTE_MCA_hwloc_default_binding_policy" \
