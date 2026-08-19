@@ -32,9 +32,24 @@ namespace parameters
 int main(int argc, char *argv[])
 {
       int myrank = 0, nprocs = 1;
+      // The OJ may launch ABE through its original HPC_init runner instead
+      // of run.sh. In that path the runner does not install our MCA settings,
+      // and OpenMPI can silently fall back to TCP when /dev/shm is small.
+      // Set local shared-memory defaults before MPI_Init, while preserving
+      // any explicit launcher configuration.
+      if (getenv("OMPI_MCA_btl") == nullptr)
+            setenv("OMPI_MCA_btl", "sm,self", 1);
+      if (getenv("OMPI_MCA_btl_sm_backing_directory") == nullptr)
+            setenv("OMPI_MCA_btl_sm_backing_directory", "/tmp", 1);
+      if (getenv("OMPI_MCA_btl_sm_single_copy_mechanism") == nullptr)
+            setenv("OMPI_MCA_btl_sm_single_copy_mechanism", "emulation", 1);
+
       MPI_Init(&argc, &argv);
       MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
       MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+      if (myrank == 0)
+            cout << " MPI transport: btl=" << getenv("OMPI_MCA_btl")
+                 << " backing=" << getenv("OMPI_MCA_btl_sm_backing_directory") << endl;
 
       double Begin_clock, End_clock;
       if (myrank == 0)
