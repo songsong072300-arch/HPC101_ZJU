@@ -108,6 +108,11 @@ echo "==> Output   : $AMSS_OUTPUT_ROOT"
 echo "==> Cache    : $AMSS_CACHE_DIR"
 echo "==> MPI exec : $AMSS_MPIEXEC"
 
+# Diagnostic: print OpenMPI version and available BTLs
+echo "==> OpenMPI version: $(mpiexec --version 2>&1 | head -1)"
+echo "==> /dev/shm size: $(df -h /dev/shm 2>/dev/null | tail -1 || echo 'N/A')"
+echo "==> /tmp size: $(df -h /tmp 2>/dev/null | tail -1 || echo 'N/A')"
+
 cd "$ROOT_DIR"
 # Use env to ensure our AMSS_MPIEXEC and OMP_* overrides reach the child
 # Python process even if the OJ injects conflicting values later.
