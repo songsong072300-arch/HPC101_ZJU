@@ -43,14 +43,15 @@ export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
 # forward compatibility; OpenMPI silently ignores unknown BTL names.
 export PRTE_MCA_hwloc_default_binding_policy="none"
 export OMPI_MCA_mpi_yield_when_idle="1"
-# Force shared-memory BTL for intra-node communication (disable TCP):
-export OMPI_MCA_btl="sm,vader,self"
-# Point shared-memory backing files to /tmp (avoid /dev/shm size limit):
-export OMPI_MCA_btl_sm_backing_directory="/tmp"
+# Force shared-memory BTL for intra-node communication (disable TCP).
+# OpenMPI 5.x uses vader; sm was removed in 4.x so don't include it.
+export OMPI_MCA_btl="vader,self"
+# Point vader backing files to /tmp (avoid /dev/shm 64MB limit).
+# This only affects vader's small control segments, not large messages.
 export OMPI_MCA_btl_vader_backing_directory="/tmp"
-# Use emulation copy (compatible with tiny /dev/shm):
-export OMPI_MCA_btl_sm_single_copy_mechanism="emulation"
-export OMPI_MCA_btl_vader_single_copy_mechanism="emulation"
+# Do NOT set single_copy_mechanism=emulation — it overrides the default
+# cma (process_vm_readv, zero-copy) with a slower double-copy path.
+# cma does NOT depend on /dev/shm; it works through kernel syscalls.
 
 # ============================================================
 # O8 最佳配置默认值（判题器直接 ./run.sh 时自动生效，环境变量可覆盖）
