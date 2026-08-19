@@ -131,6 +131,11 @@ exec env \
   OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="$OMPI_ALLOW_RUN_AS_ROOT_CONFIRM" \
   PRTE_MCA_hwloc_default_binding_policy="$PRTE_MCA_hwloc_default_binding_policy" \
   OMPI_MCA_mpi_yield_when_idle="$OMPI_MCA_mpi_yield_when_idle" \
+  OMPI_MCA_btl="$OMPI_MCA_btl" \
+  OMPI_MCA_btl_sm_backing_directory="$OMPI_MCA_btl_sm_backing_directory" \
+  OMPI_MCA_btl_vader_backing_directory="$OMPI_MCA_btl_vader_backing_directory" \
+  OMPI_MCA_btl_sm_single_copy_mechanism="$OMPI_MCA_btl_sm_single_copy_mechanism" \
+  OMPI_MCA_btl_vader_single_copy_mechanism="$OMPI_MCA_btl_vader_single_copy_mechanism" \
   OMP_PROC_BIND="$OMP_PROC_BIND" \
   OMP_DYNAMIC="$OMP_DYNAMIC" \
   OMP_NUM_THREADS="$OMP_NUM_THREADS" \
