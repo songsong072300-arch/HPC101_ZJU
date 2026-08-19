@@ -23,6 +23,16 @@ ulimit -s unlimited
 export OMPI_ALLOW_RUN_AS_ROOT="${OMPI_ALLOW_RUN_AS_ROOT:-1}"
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
 
+# The OJ uses its own Python launch helper, which invokes plain
+# `mpirun -np ...` and does not honor AMSS_MPIEXEC. Configure Open MPI 5 /
+# PRRTE through variables consumed by the launcher itself so the O8
+# owner-local workload remains unbound and MPI waiters yield their CPUs.
+# Without these settings, PRRTE binds every rank to one core and Open MPI
+# busy-polls in opal_progress; the 29 waiting ranks then starve the owner
+# rank's 16-thread surface interpolation team.
+export PRTE_MCA_hwloc_default_binding_policy="none"
+export OMPI_MCA_mpi_yield_when_idle="1"
+
 # ============================================================
 # O8 最佳配置默认值（判题器直接 ./run.sh 时自动生效，环境变量可覆盖）
 # unbound 调度: 空闲 rank 让出 CPU 给 owner-local 计算线程, 实测最快
