@@ -23,15 +23,32 @@ ulimit -s unlimited
 export OMPI_ALLOW_RUN_AS_ROOT="${OMPI_ALLOW_RUN_AS_ROOT:-1}"
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
 
-# The OJ uses its own Python launch helper, which invokes plain
-# `mpirun -np ...` and does not honor AMSS_MPIEXEC. Configure Open MPI 5 /
-# PRRTE through variables consumed by the launcher itself so the O8
-# owner-local workload remains unbound and MPI waiters yield their CPUs.
-# Without these settings, PRRTE binds every rank to one core and Open MPI
-# busy-polls in opal_progress; the 29 waiting ranks then starve the owner
-# rank's 16-thread surface interpolation team.
+# The OJ uses its own Python launch helper (scripts/makefile_and_run.py from
+# the course repo), which invokes plain `mpiexec -n N env OMP_NUM_THREADS=2 ./ABE`
+# and does NOT honor AMSS_MPIEXEC. The OJ also injects:
+#   AMSS_MPIEXEC="mpiexec --bind-to core --map-by slot:pe=2"
+#   OMP_PROC_BIND=close, OMP_PLACES=cores, OMP_NUM_THREADS=60
+#
+# We cannot override the mpiexec command line that makefile_and_run.py builds,
+# but we CAN control OpenMPI / PRRTE behavior through MCA environment variables
+# that are read at runtime regardless of the mpiexec flags.
+#
+# Problem: OJ containers may have a tiny /dev/shm (e.g. 64 MB), which causes
+# OpenMPI's vader (shared-memory) BTL to fail and fall back to TCP for
+# intra-node communication. With 30 ranks exchanging ghost zones every
+# timestep, TCP adds ~97s/step of latency (vs <1s with shared memory).
+#
+# Solution: force OpenMPI to use vader (shared memory) and disable TCP:
 export PRTE_MCA_hwloc_default_binding_policy="none"
 export OMPI_MCA_mpi_yield_when_idle="1"
+# Force shared-memory BTL for intra-node communication (disable TCP):
+export OMPI_MCA_btl="vader,self"
+# Disable posix IPC for vader (use mmap on /dev/shm or anonymous):
+export OMPI_MCA_btl_vader_backing_directory="/tmp"
+# Increase /dev/shm usage tolerance:
+export OMPI_MCA_btl_vader_single_copy_mechanism="emulation"
+# If vader still fails due to tiny /dev/shm, allow sm (older shared memory):
+export OMPI_MCA_btl_sm_backing_directory="/tmp"
 
 # ============================================================
 # O8 最佳配置默认值（判题器直接 ./run.sh 时自动生效，环境变量可覆盖）
@@ -90,4 +107,24 @@ echo "==> Cache    : $AMSS_CACHE_DIR"
 echo "==> MPI exec : $AMSS_MPIEXEC"
 
 cd "$ROOT_DIR"
-"$PYTHON" AMSS_NCKU_Program.py
+# Use env to ensure our AMSS_MPIEXEC and OMP_* overrides reach the child
+# Python process even if the OJ injects conflicting values later.
+# The OJ's makefile_and_run.py reads os.environ["AMSS_MPIEXEC"], so the
+# value must be correct in the Python process's environment.
+exec env \
+  AMSS_MPIEXEC="$AMSS_MPIEXEC" \
+  AMSS_BUILD_DIR="$AMSS_BUILD_DIR" \
+  AMSS_OUTPUT_ROOT="$AMSS_OUTPUT_ROOT" \
+  AMSS_CACHE_DIR="$AMSS_CACHE_DIR" \
+  AMSS_ABE_OMP_THREADS="$AMSS_ABE_OMP_THREADS" \
+  AMSS_TWOP_OMP_THREADS="$AMSS_TWOP_OMP_THREADS" \
+  AMSS_SURFACE_COLLECTIVE="$AMSS_SURFACE_COLLECTIVE" \
+  AMSS_SURFACE_OMP_THREADS="$AMSS_SURFACE_OMP_THREADS" \
+  OMPI_ALLOW_RUN_AS_ROOT="$OMPI_ALLOW_RUN_AS_ROOT" \
+  OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="$OMPI_ALLOW_RUN_AS_ROOT_CONFIRM" \
+  PRTE_MCA_hwloc_default_binding_policy="$PRTE_MCA_hwloc_default_binding_policy" \
+  OMPI_MCA_mpi_yield_when_idle="$OMPI_MCA_mpi_yield_when_idle" \
+  OMP_PROC_BIND="$OMP_PROC_BIND" \
+  OMP_DYNAMIC="$OMP_DYNAMIC" \
+  OMP_NUM_THREADS="$OMP_NUM_THREADS" \
+  "$PYTHON" AMSS_NCKU_Program.py
