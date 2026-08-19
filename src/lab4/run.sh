@@ -46,9 +46,8 @@ export OMPI_MCA_mpi_yield_when_idle="1"
 # Force shared-memory BTL for intra-node communication (disable TCP).
 # OpenMPI 5.x uses vader; sm was removed in 4.x so don't include it.
 export OMPI_MCA_btl="vader,self"
-# Point vader backing files to /tmp (avoid /dev/shm 64MB limit).
-# This only affects vader's small control segments, not large messages.
-export OMPI_MCA_btl_vader_backing_directory="/tmp"
+# Do NOT override vader backing directory — let it default to /dev/shm
+# (tmpfs, fastest). Only override if /dev/shm is tiny (<100MB).
 # Do NOT set single_copy_mechanism=emulation — it overrides the default
 # cma (process_vm_readv, zero-copy) with a slower double-copy path.
 # cma does NOT depend on /dev/shm; it works through kernel syscalls.
@@ -133,7 +132,6 @@ exec env \
   PRTE_MCA_hwloc_default_binding_policy="$PRTE_MCA_hwloc_default_binding_policy" \
   OMPI_MCA_mpi_yield_when_idle="$OMPI_MCA_mpi_yield_when_idle" \
   OMPI_MCA_btl="$OMPI_MCA_btl" \
-  OMPI_MCA_btl_vader_backing_directory="$OMPI_MCA_btl_vader_backing_directory" \
   OMP_PROC_BIND="$OMP_PROC_BIND" \
   OMP_DYNAMIC="$OMP_DYNAMIC" \
   OMP_NUM_THREADS="$OMP_NUM_THREADS" \
