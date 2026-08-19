@@ -112,6 +112,9 @@ echo "==> MPI exec : $AMSS_MPIEXEC"
 echo "==> OpenMPI version: $(mpiexec --version 2>&1 | head -1)"
 echo "==> /dev/shm size: $(df -h /dev/shm 2>/dev/null | tail -1 || echo 'N/A')"
 echo "==> /tmp size: $(df -h /tmp 2>/dev/null | tail -1 || echo 'N/A')"
+echo "==> nproc: $(nproc)"
+echo "==> cpu.max: $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo 'N/A')"
+echo "==> cpuset: $(cat /proc/self/status 2>/dev/null | grep Cpus_allowed_list || echo 'N/A')"
 
 cd "$ROOT_DIR"
 # Use env to ensure our AMSS_MPIEXEC and OMP_* overrides reach the child
