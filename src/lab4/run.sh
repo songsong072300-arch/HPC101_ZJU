@@ -34,21 +34,23 @@ export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
 # that are read at runtime regardless of the mpiexec flags.
 #
 # Problem: OJ containers may have a tiny /dev/shm (e.g. 64 MB), which causes
-# OpenMPI's vader (shared-memory) BTL to fail and fall back to TCP for
+# OpenMPI's shared-memory BTL to fail and fall back to TCP for
 # intra-node communication. With 30 ranks exchanging ghost zones every
-# timestep, TCP adds ~97s/step of latency (vs <1s with shared memory).
+# timestep, TCP adds ~86s/step of latency (vs <1s with shared memory).
 #
-# Solution: force OpenMPI to use vader (shared memory) and disable TCP:
+# Solution: force OpenMPI to use shared-memory BTL and disable TCP.
+# OpenMPI 3.x uses "sm", OpenMPI 4.x+ uses "vader" — include both for
+# forward compatibility; OpenMPI silently ignores unknown BTL names.
 export PRTE_MCA_hwloc_default_binding_policy="none"
 export OMPI_MCA_mpi_yield_when_idle="1"
 # Force shared-memory BTL for intra-node communication (disable TCP):
-export OMPI_MCA_btl="vader,self"
-# Disable posix IPC for vader (use mmap on /dev/shm or anonymous):
-export OMPI_MCA_btl_vader_backing_directory="/tmp"
-# Increase /dev/shm usage tolerance:
-export OMPI_MCA_btl_vader_single_copy_mechanism="emulation"
-# If vader still fails due to tiny /dev/shm, allow sm (older shared memory):
+export OMPI_MCA_btl="sm,vader,self"
+# Point shared-memory backing files to /tmp (avoid /dev/shm size limit):
 export OMPI_MCA_btl_sm_backing_directory="/tmp"
+export OMPI_MCA_btl_vader_backing_directory="/tmp"
+# Use emulation copy (compatible with tiny /dev/shm):
+export OMPI_MCA_btl_sm_single_copy_mechanism="emulation"
+export OMPI_MCA_btl_vader_single_copy_mechanism="emulation"
 
 # ============================================================
 # O8 最佳配置默认值（判题器直接 ./run.sh 时自动生效，环境变量可覆盖）
