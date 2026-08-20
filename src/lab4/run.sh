@@ -11,9 +11,6 @@
 #   AMSS_TWOP_OMP_THREADS  OpenMP threads for TwoPuncture (default: 30, O1)
 #   AMSS_SURFACE_COLLECTIVE  owner_local (default), allreduce, or reduce_scatter
 #   AMSS_SURFACE_OMP_THREADS  threads for owner-local surface interp (default: 16, O8)
-#   AMSS_PHASE_TIMING        per-step wall/CPU/cgroup timing diagnostics (default: 1)
-#   AMSS_MPI_DIAGNOSTICS     per-step MPI Waitall diagnostics (default: 1)
-#   AMSS_SYNC_SITE_DIAGNOSTICS per-Sync-site MPI diagnostics (default: 0)
 #   AMSS_MPI_YIELD_WHEN_IDLE MPI polling policy (default: 1)
 #   AMSS_MPI_BIND_TO         Open MPI binding policy (default: none)
 #   AMSS_MPI_MAP_BY          Open MPI mapping policy (default: slot)
@@ -71,11 +68,9 @@ export AMSS_ABE_OMP_THREADS="2"
 export AMSS_TWOP_OMP_THREADS="30"
 export AMSS_SURFACE_COLLECTIVE="owner_local"
 export AMSS_SURFACE_OMP_THREADS="16"
-# Keep detailed diagnostics enabled for OJ verification; callers can disable them
-# explicitly after rank placement has been confirmed.
-export AMSS_PHASE_TIMING="${AMSS_PHASE_TIMING:-1}"
-export AMSS_MPI_DIAGNOSTICS="${AMSS_MPI_DIAGNOSTICS:-1}"
-export AMSS_SYNC_SITE_DIAGNOSTICS="${AMSS_SYNC_SITE_DIAGNOSTICS:-0}"
+# Production runs do not collect phase, MPI-wait, or per-Sync-site diagnostics.
+# Dedicated profiling scripts may set these variables when invoking ABE directly.
+unset AMSS_PHASE_TIMING AMSS_MPI_DIAGNOSTICS AMSS_SYNC_SITE_DIAGNOSTICS
 export AMSS_MPI_YIELD_WHEN_IDLE="${AMSS_MPI_YIELD_WHEN_IDLE:-1}"
 export AMSS_MPI_BIND_TO="${AMSS_MPI_BIND_TO:-none}"
 export AMSS_MPI_MAP_BY="${AMSS_MPI_MAP_BY:-slot}"
@@ -131,17 +126,9 @@ echo "==> Build    : $AMSS_BUILD_DIR"
 echo "==> Output   : $AMSS_OUTPUT_ROOT"
 echo "==> Cache    : $AMSS_CACHE_DIR"
 echo "==> MPI exec : $AMSS_MPIEXEC"
-echo "==> Diagnostics: phase=$AMSS_PHASE_TIMING mpi=$AMSS_MPI_DIAGNOSTICS sync_site=$AMSS_SYNC_SITE_DIAGNOSTICS"
 echo "==> MPI policy: yield=$AMSS_MPI_YIELD_WHEN_IDLE map=$AMSS_MPI_MAP_BY bind=$AMSS_MPI_BIND_TO oversubscribe=$AMSS_MPI_OVERSUBSCRIBE"
 echo "==> Rank OpenMP: proc_bind=$OMP_PROC_BIND places=$rank_omp_places dynamic=$OMP_DYNAMIC"
 
-# Diagnostic: print OpenMPI version and available BTLs
-echo "==> OpenMPI version: $(mpiexec --version 2>&1 | head -1)"
-echo "==> /dev/shm size: $(df -h /dev/shm 2>/dev/null | tail -1 || echo 'N/A')"
-echo "==> /tmp size: $(df -h /tmp 2>/dev/null | tail -1 || echo 'N/A')"
-echo "==> nproc: $(nproc)"
-echo "==> cpu.max: $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo 'N/A')"
-echo "==> cpuset: $(cat /proc/self/status 2>/dev/null | grep Cpus_allowed_list || echo 'N/A')"
 
 cd "$ROOT_DIR"
 # Use env to ensure our AMSS_MPIEXEC and OMP_* overrides reach the child
@@ -157,9 +144,6 @@ exec env \
   AMSS_TWOP_OMP_THREADS="$AMSS_TWOP_OMP_THREADS" \
   AMSS_SURFACE_COLLECTIVE="$AMSS_SURFACE_COLLECTIVE" \
   AMSS_SURFACE_OMP_THREADS="$AMSS_SURFACE_OMP_THREADS" \
-  AMSS_PHASE_TIMING="$AMSS_PHASE_TIMING" \
-  AMSS_MPI_DIAGNOSTICS="$AMSS_MPI_DIAGNOSTICS" \
-  AMSS_SYNC_SITE_DIAGNOSTICS="$AMSS_SYNC_SITE_DIAGNOSTICS" \
   AMSS_MPI_YIELD_WHEN_IDLE="$AMSS_MPI_YIELD_WHEN_IDLE" \
   AMSS_MPI_BIND_TO="$AMSS_MPI_BIND_TO" \
   AMSS_MPI_MAP_BY="$AMSS_MPI_MAP_BY" \

@@ -115,10 +115,6 @@ int main(int argc, char *argv[])
       MPI_Init(&argc, &argv);
       MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
       MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
-      if (myrank == 0)
-            cout << " MPI transport: btl=" << env_or_unset("OMPI_MCA_btl")
-                 << " sm_backing=" << env_or_unset("OMPI_MCA_btl_sm_backing_directory")
-                 << " vader_backing=" << env_or_unset("OMPI_MCA_btl_vader_backing_directory") << endl;
 
       if (diagnostics_enabled())
       {
