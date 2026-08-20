@@ -17,18 +17,45 @@ bool mpi_diagnostics_enabled()
     return enabled;
 }
 
-Parallel::CommDiagnostics comm_diagnostics = {0, 0, 0, 0.0, 0.0};
-
-void record_waitall(int requests, long long elements, double elapsed)
+bool sync_site_diagnostics_enabled()
 {
-    if (!mpi_diagnostics_enabled())
-        return;
-    comm_diagnostics.wait_calls++;
-    comm_diagnostics.requests += requests;
-    comm_diagnostics.elements += elements;
-    comm_diagnostics.wait_total += elapsed;
-    if (elapsed > comm_diagnostics.wait_max)
-        comm_diagnostics.wait_max = elapsed;
+    static const bool enabled = [] {
+        const char *value = getenv("AMSS_SYNC_SITE_DIAGNOSTICS");
+        return value != nullptr && strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+Parallel::CommDiagnostics comm_diagnostics = {0, 0, 0, 0.0, 0.0};
+Parallel::SyncSiteDiagnostics sync_site_diagnostics[Parallel::SYNC_SITE_COUNT] = {};
+
+void record_waitall(int requests, long long elements, double elapsed, int sync_site)
+{
+    if (mpi_diagnostics_enabled()) {
+        comm_diagnostics.wait_calls++;
+        comm_diagnostics.requests += requests;
+        comm_diagnostics.elements += elements;
+        comm_diagnostics.wait_total += elapsed;
+        if (elapsed > comm_diagnostics.wait_max)
+            comm_diagnostics.wait_max = elapsed;
+    }
+    if (sync_site_diagnostics_enabled() && sync_site > Parallel::SYNC_SITE_NONE &&
+        sync_site < Parallel::SYNC_SITE_COUNT) {
+        Parallel::SyncSiteDiagnostics &site = sync_site_diagnostics[sync_site];
+        site.wait_calls++;
+        site.requests += requests;
+        site.elements += elements;
+        site.wait_total += elapsed;
+        if (elapsed > site.wait_max)
+            site.wait_max = elapsed;
+    }
+}
+
+void record_sync_call(int sync_site)
+{
+    if (sync_site_diagnostics_enabled() && sync_site > Parallel::SYNC_SITE_NONE &&
+        sync_site < Parallel::SYNC_SITE_COUNT)
+        sync_site_diagnostics[sync_site].sync_calls++;
 }
 }
 
@@ -40,6 +67,48 @@ void Parallel::reset_comm_diagnostics()
 Parallel::CommDiagnostics Parallel::get_comm_diagnostics()
 {
     return comm_diagnostics;
+}
+
+void Parallel::reset_sync_site_diagnostics()
+{
+    memset(sync_site_diagnostics, 0, sizeof(sync_site_diagnostics));
+}
+
+Parallel::SyncSiteDiagnostics Parallel::get_sync_site_diagnostics(int site)
+{
+    if (site <= SYNC_SITE_NONE || site >= SYNC_SITE_COUNT)
+        return {0, 0, 0, 0, 0.0, 0.0};
+    return sync_site_diagnostics[site];
+}
+
+const char *Parallel::sync_site_name(int site)
+{
+    static const char *const names[SYNC_SITE_COUNT] = {
+        "none",
+        "rk_predictor",
+        "rk_corrector",
+        "rp_args_coarse_temp",
+        "rp_args_coarse_state",
+        "rp_args_fine",
+        "rp_aux_coarse_temp",
+        "rp_aux_coarse_state",
+        "rp_aux_fine",
+        "rp_coarse_temp",
+        "rp_coarse_state",
+        "rp_fine",
+        "pr_coarse_state",
+        "pr_fine",
+        "psi4",
+        "constraint_out",
+        "interp_constraint",
+        "compute_constraint",
+        "test_restrict",
+        "test_outbd",
+        "fill_future",
+        "fill_temp",
+        "fill_combined"
+    };
+    return site >= 0 && site < SYNC_SITE_COUNT ? names[site] : "invalid";
 }
 
 #ifdef USE_GPU
@@ -2548,7 +2617,7 @@ int Parallel::data_packermix(double *data, MyList<Parallel::gridseg> *src, MyLis
 
 void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridseg> **dst,
                                                 MyList<var> *VarList1 /* source */, MyList<var> *VarList2 /*target */,
-                                                int Symmetry)
+                                                int Symmetry, int sync_site)
 {
     int myrank, cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
@@ -2567,6 +2636,8 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
         reqs_size = 2 * cpusize;
     }
     int req_no = 0;
+    const bool diagnose_wait = mpi_diagnostics_enabled() ||
+                               (sync_site != SYNC_SITE_NONE && sync_site_diagnostics_enabled());
     long long diagnostic_elements = 0;
 
     double **send_data, **rec_data;
@@ -2603,7 +2674,7 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
                 }
                 data_packer(send_data[node], src[myrank], dst[myrank], node, PACK, VarList1, VarList2, Symmetry);
                 MPI_Isend((void *)send_data[node], length, MPI_DOUBLE, node, 1, MPI_COMM_WORLD, reqs + req_no++);
-                if (mpi_diagnostics_enabled()) diagnostic_elements += length;
+                if (diagnose_wait) diagnostic_elements += length;
             }
             // receive from cpu#node to this cpu
             if (length = data_packer(0, src[node], dst[node], node, UNPACK, VarList1, VarList2, Symmetry))
@@ -2615,15 +2686,15 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
                     MPI_Abort(MPI_COMM_WORLD, 1);
                 }
                 MPI_Irecv((void *)rec_data[node], length, MPI_DOUBLE, node, 1, MPI_COMM_WORLD, reqs + req_no++);
-                if (mpi_diagnostics_enabled()) diagnostic_elements += length;
+                if (diagnose_wait) diagnostic_elements += length;
             }
         }
     }
     // wait for all requests to complete
-    double wait_start = mpi_diagnostics_enabled() ? MPI_Wtime() : 0.0;
+    double wait_start = diagnose_wait ? MPI_Wtime() : 0.0;
     MPI_Waitall(req_no, reqs, stats);
-    if (mpi_diagnostics_enabled())
-        record_waitall(req_no, diagnostic_elements, MPI_Wtime() - wait_start);
+    if (diagnose_wait)
+        record_waitall(req_no, diagnostic_elements, MPI_Wtime() - wait_start, sync_site);
 
     for (node = 0; node < cpusize; node++)
         if (rec_data[node])
@@ -2663,6 +2734,7 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
         reqs_size = 2 * cpusize;
     }
     int req_no = 0;
+    const bool diagnose_wait = mpi_diagnostics_enabled();
     long long diagnostic_elements = 0;
 
     double **send_data, **rec_data;
@@ -2699,7 +2771,7 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
                 }
                 data_packermix(send_data[node], src[myrank], dst[myrank], node, PACK, VarList1, VarList2, Symmetry);
                 MPI_Isend((void *)send_data[node], length, MPI_DOUBLE, node, 1, MPI_COMM_WORLD, reqs + req_no++);
-                if (mpi_diagnostics_enabled()) diagnostic_elements += length;
+                if (diagnose_wait) diagnostic_elements += length;
             }
             // receive from cpu#node to this cpu
             if (length = data_packermix(0, src[node], dst[node], node, UNPACK, VarList1, VarList2, Symmetry))
@@ -2711,15 +2783,15 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
                     MPI_Abort(MPI_COMM_WORLD, 1);
                 }
                 MPI_Irecv((void *)rec_data[node], length, MPI_DOUBLE, node, 1, MPI_COMM_WORLD, reqs + req_no++);
-                if (mpi_diagnostics_enabled()) diagnostic_elements += length;
+                if (diagnose_wait) diagnostic_elements += length;
             }
         }
     }
     // wait for all requests to complete
-    double wait_start = mpi_diagnostics_enabled() ? MPI_Wtime() : 0.0;
+    double wait_start = diagnose_wait ? MPI_Wtime() : 0.0;
     MPI_Waitall(req_no, reqs, stats);
-    if (mpi_diagnostics_enabled())
-        record_waitall(req_no, diagnostic_elements, MPI_Wtime() - wait_start);
+    if (diagnose_wait)
+        record_waitall(req_no, diagnostic_elements, MPI_Wtime() - wait_start, SYNC_SITE_NONE);
 
     for (node = 0; node < cpusize; node++)
         if (rec_data[node])
@@ -2738,7 +2810,7 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
     delete[] rec_data;
 }
 
-void Parallel::Sync(Patch *Pat, MyList<var> *VarList, int Symmetry)
+void Parallel::Sync(Patch *Pat, MyList<var> *VarList, int Symmetry, int sync_site)
 {
     int cpusize;
     MPI_Comm_size(MPI_COMM_WORLD, &cpusize);
@@ -2757,7 +2829,7 @@ void Parallel::Sync(Patch *Pat, MyList<var> *VarList, int Symmetry)
                                                                                                                                                     // but for transfer_dst[node] the data may locate on any node
     }
 
-    transfer(transfer_src, transfer_dst, VarList, VarList, Symmetry);
+    transfer(transfer_src, transfer_dst, VarList, VarList, Symmetry, sync_site);
 
     if (dst)
         dst->destroyList();
@@ -2775,13 +2847,14 @@ void Parallel::Sync(Patch *Pat, MyList<var> *VarList, int Symmetry)
     delete[] transfer_src;
     delete[] transfer_dst;
 }
-void Parallel::Sync(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry)
+void Parallel::Sync(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry, int sync_site)
 {
+    record_sync_call(sync_site);
     // Patch inner Synch
     MyList<Patch> *Pp = PatL;
     while (Pp)
     {
-        Sync(Pp->data, VarList, Symmetry);
+        Sync(Pp->data, VarList, Symmetry, sync_site);
         Pp = Pp->next;
     }
 
@@ -2802,7 +2875,7 @@ void Parallel::Sync(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry)
         build_gstl(src[node], dst, &transfer_src[node], &transfer_dst[node]); // for transfer[node], data locate on cpu#node
     }
 
-    transfer(transfer_src, transfer_dst, VarList, VarList, Symmetry);
+    transfer(transfer_src, transfer_dst, VarList, VarList, Symmetry, sync_site);
 
     if (dst)
         dst->destroyList();
@@ -4365,7 +4438,7 @@ void Parallel::fill_level_data(MyList<Patch> *PatLd, MyList<Patch> *PatLs, MyLis
             // restrict first~~~>
             {
                 Restrict(PatcL, PatLs, FutureList, FutureList, Symmetry);
-                Sync(PatcL, FutureList, Symmetry);
+                Sync(PatcL, FutureList, Symmetry, SYNC_SITE_FILL_FUTURE);
             }
             //<~~~prolong then
             transfer(transfer_src, transfer_dst, FutureList, FutureList, Symmetry);
@@ -4381,7 +4454,7 @@ void Parallel::fill_level_data(MyList<Patch> *PatLd, MyList<Patch> *PatLs, MyLis
                                                                                          // restrict first~~~>
             {
                 Restrict(PatcL, PatLs, StateList, tmList, Symmetry);
-                Sync(PatcL, tmList, Symmetry);
+                Sync(PatcL, tmList, Symmetry, SYNC_SITE_FILL_TEMP);
             }
             //<~~~prolong then
             transfer(transfer_src, transfer_dst, tmList, StateList, Symmetry);
@@ -4392,7 +4465,7 @@ void Parallel::fill_level_data(MyList<Patch> *PatLd, MyList<Patch> *PatLs, MyLis
             // restrict first~~~>
             {
                 Restrict(PatcL, PatLs, VarList, VarList, Symmetry);
-                Sync(PatcL, VarList, Symmetry);
+                Sync(PatcL, VarList, Symmetry, SYNC_SITE_FILL_COMBINED);
             }
             //<~~~prolong then
             transfer(transfer_src, transfer_dst, VarList, VarList, Symmetry);

@@ -19,6 +19,10 @@ case "$BUILD_DIR" in
 esac
 
 cmake_args=()
+# FindOpenMP caches an absolute libgomp path.  Toolchain/environment changes
+# can otherwise leave subsequent builds pinned to the wrong OpenMP runtime.
+# Re-detect the library while retaining all other incremental CMake state.
+cmake_args+=("-UOpenMP_gomp_LIBRARY")
 # MPI wrapper wins over plain CXX — the wrapper carries the right MPI flags
 # and include paths. Setting both to different values is almost always a
 # mistake, so warn instead of silently letting CXX override the wrapper.

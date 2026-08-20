@@ -48,6 +48,12 @@ bool mpi_diagnostics_enabled()
   return enabled;
 }
 
+bool sync_site_diagnostics_enabled()
+{
+  static const bool enabled = diagnostic_flag("AMSS_SYNC_SITE_DIAGNOSTICS");
+  return enabled;
+}
+
 struct CgroupCpuStats
 {
   long long usage_usec;
@@ -178,6 +184,54 @@ void report_comm_diagnostics(int step, int myrank, int nprocs)
          << " wait_max=" << max_wait.value << " max_rank=" << max_wait.rank
          << " longest_call=" << longest_wait << endl;
   }
+}
+
+void report_sync_site_diagnostics(int step, int myrank, int nprocs)
+{
+  if (!sync_site_diagnostics_enabled())
+    return;
+
+  const int count = Parallel::SYNC_SITE_COUNT;
+  long long local_calls[count] = {}, calls_min[count] = {}, calls_max[count] = {};
+  long long local_waitalls[count] = {}, waitalls_max[count] = {};
+  long long local_requests[count] = {}, requests_sum[count] = {};
+  long long local_elements[count] = {}, elements_sum[count] = {};
+  double local_wait_total[count] = {}, wait_sum[count] = {}, wait_max[count] = {};
+  double local_longest[count] = {}, longest_wait[count] = {};
+
+  for (int site = 1; site < count; ++site)
+  {
+    Parallel::SyncSiteDiagnostics local = Parallel::get_sync_site_diagnostics(site);
+    local_calls[site] = local.sync_calls;
+    local_waitalls[site] = local.wait_calls;
+    local_requests[site] = local.requests;
+    local_elements[site] = local.elements;
+    local_wait_total[site] = local.wait_total;
+    local_longest[site] = local.wait_max;
+  }
+
+  MPI_Reduce(local_calls, calls_min, count, MPI_LONG_LONG, MPI_MIN, 0, MPI_COMM_WORLD);
+  MPI_Reduce(local_calls, calls_max, count, MPI_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+  MPI_Reduce(local_waitalls, waitalls_max, count, MPI_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+  MPI_Reduce(local_requests, requests_sum, count, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(local_elements, elements_sum, count, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(local_wait_total, wait_sum, count, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(local_wait_total, wait_max, count, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  MPI_Reduce(local_longest, longest_wait, count, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+  if (myrank == 0)
+    for (int site = 1; site < count; ++site)
+      if (calls_max[site] != 0 || waitalls_max[site] != 0)
+        cout << " Sync site summary: step=" << step
+             << " site=" << Parallel::sync_site_name(site)
+             << " calls_min=" << calls_min[site]
+             << " calls_max=" << calls_max[site]
+             << " waitalls_max=" << waitalls_max[site]
+             << " requests_sum=" << requests_sum[site]
+             << " volume_sum_MiB=" << (elements_sum[site] * sizeof(double) / 1048576.0)
+             << " wait_avg=" << wait_sum[site] / nprocs
+             << " wait_max=" << wait_max[site]
+             << " longest_call=" << longest_wait[site] << endl;
 }
 }
 
@@ -1707,7 +1761,8 @@ void bssn_class::Evolve(int Steps)
 
   for (int ncount = 1; ncount < Steps + 1; ncount++)
   {
-    const bool detailed_timing = phase_timing_enabled() || mpi_diagnostics_enabled();
+    const bool detailed_timing = phase_timing_enabled() || mpi_diagnostics_enabled() ||
+                                 sync_site_diagnostics_enabled();
     const double step_start = detailed_timing ? MPI_Wtime() : 0.0;
     const clock_t rank_cpu_start = phase_timing_enabled() ? clock() : 0;
     const CgroupCpuStats cgroup_start =
@@ -1715,6 +1770,8 @@ void bssn_class::Evolve(int Steps)
                                                : empty_cgroup_cpu_stats();
     if (mpi_diagnostics_enabled())
       Parallel::reset_comm_diagnostics();
+    if (sync_site_diagnostics_enabled())
+      Parallel::reset_sync_site_diagnostics();
     // special for large mass ratio consideration
     //     if(fabs(Porg0[0][0]-Porg0[1][0])+fabs(Porg0[0][1]-Porg0[1][1])+fabs(Porg0[0][2]-Porg0[1][2])<1e-6) 
     //     { GH->levels=GH->movls; }
@@ -1738,6 +1795,7 @@ void bssn_class::Evolve(int Steps)
     const double step_wall = detailed_timing ? MPI_Wtime() - step_start : 0.0;
     report_phase_timing("StepBody", ncount, step_wall, myrank, nprocs);
     report_comm_diagnostics(ncount, myrank, nprocs);
+    report_sync_site_diagnostics(ncount, myrank, nprocs);
 
     phase_start = phase_timing_enabled() ? MPI_Wtime() : 0.0;
 
@@ -2134,7 +2192,14 @@ void bssn_class::Step(int lev, int YN)
   // check error information
   {
     int erh = ERROR;
-    MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Request error_reduce;
+    MPI_Iallreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD,
+                   &error_reduce);
+    // O62: let fast ranks post ghost exchanges while slower ranks finish the
+    // RK substep instead of turning the error reduction into a global barrier.
+    Parallel::Sync(GH->PatL[lev], SynchList_pre, Symmetry,
+                   Parallel::SYNC_SITE_RK_PREDICTOR);
+    MPI_Wait(&error_reduce, MPI_STATUS_IGNORE);
   }
   if (ERROR)
   {
@@ -2146,10 +2211,6 @@ void bssn_class::Step(int lev, int YN)
       MPI_Abort(MPI_COMM_WORLD, 1);
     }
   }
-
-
-  Parallel::Sync(GH->PatL[lev], SynchList_pre, Symmetry);
-
   // corrector
   for (iter_count = 1; iter_count < 4; iter_count++)
   {
@@ -2260,7 +2321,12 @@ void bssn_class::Step(int lev, int YN)
     // check error information
     {
       int erh = ERROR;
-      MPI_Allreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Request error_reduce;
+      MPI_Iallreduce(&erh, &ERROR, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD,
+                     &error_reduce);
+      Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry,
+                     Parallel::SYNC_SITE_RK_CORRECTOR);
+      MPI_Wait(&error_reduce, MPI_STATUS_IGNORE);
     }
 
     if (ERROR)
@@ -2275,10 +2341,6 @@ void bssn_class::Step(int lev, int YN)
         MPI_Abort(MPI_COMM_WORLD, 1);
       }
     }
-
-
-    Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry);
-
     // swap time level
     if (iter_count < 3)
     {
@@ -2396,7 +2458,8 @@ void bssn_class::RestrictProlong(int lev, int YN, bool BB,
 
       Parallel::Restrict(GH->PatL[lev - 1], GH->PatL[lev], SL, SynchList_pre, Symmetry);
 
-      Parallel::Sync(GH->PatL[lev - 1], SynchList_pre, Symmetry);
+      Parallel::Sync(GH->PatL[lev - 1], SynchList_pre, Symmetry,
+                     Parallel::SYNC_SITE_RP_ARGS_COARSE_TEMP);
 
 #if (RPB == 0)
       Ppc = GH->PatL[lev - 1];
@@ -2415,7 +2478,8 @@ void bssn_class::RestrictProlong(int lev, int YN, bool BB,
     {
       Parallel::Restrict(GH->PatL[lev - 1], GH->PatL[lev], SL, SL, Symmetry);
 
-      Parallel::Sync(GH->PatL[lev - 1], SL, Symmetry);
+      Parallel::Sync(GH->PatL[lev - 1], SL, Symmetry,
+                     Parallel::SYNC_SITE_RP_ARGS_COARSE_STATE);
 
       Ppc = GH->PatL[lev - 1];
       while (Ppc)
@@ -2430,7 +2494,8 @@ void bssn_class::RestrictProlong(int lev, int YN, bool BB,
       }
     }
 
-    Parallel::Sync(GH->PatL[lev], SL, Symmetry);
+    Parallel::Sync(GH->PatL[lev], SL, Symmetry,
+                   Parallel::SYNC_SITE_RP_ARGS_FINE);
   }
 }
 
@@ -2476,7 +2541,8 @@ void bssn_class::RestrictProlong_aux(int lev, int YN, bool BB,
 
       Parallel::Restrict(GH->PatL[lev - 1], GH->PatL[lev], SL, SynchList_pre, Symmetry);
 
-      Parallel::Sync(GH->PatL[lev - 1], SynchList_pre, Symmetry);
+      Parallel::Sync(GH->PatL[lev - 1], SynchList_pre, Symmetry,
+                     Parallel::SYNC_SITE_RP_AUX_COARSE_TEMP);
 
       Ppc = GH->PatL[lev - 1];
       while (Ppc)
@@ -2494,7 +2560,8 @@ void bssn_class::RestrictProlong_aux(int lev, int YN, bool BB,
     {
       Parallel::Restrict(GH->PatL[lev - 1], GH->PatL[lev], SL, SL, Symmetry);
 
-      Parallel::Sync(GH->PatL[lev - 1], SL, Symmetry);
+      Parallel::Sync(GH->PatL[lev - 1], SL, Symmetry,
+                     Parallel::SYNC_SITE_RP_AUX_COARSE_STATE);
       Ppc = GH->PatL[lev - 1];
       while (Ppc)
       {
@@ -2508,7 +2575,8 @@ void bssn_class::RestrictProlong_aux(int lev, int YN, bool BB,
       }
     }
 
-    Parallel::Sync(GH->PatL[lev], SL, Symmetry);
+    Parallel::Sync(GH->PatL[lev], SL, Symmetry,
+                   Parallel::SYNC_SITE_RP_AUX_FINE);
   }
 }
 
@@ -2554,7 +2622,8 @@ void bssn_class::RestrictProlong(int lev, int YN, bool BB)
 
       Parallel::Restrict(GH->PatL[lev - 1], GH->PatL[lev], SynchList_cor, SynchList_pre, Symmetry);
 
-      Parallel::Sync(GH->PatL[lev - 1], SynchList_pre, Symmetry);
+      Parallel::Sync(GH->PatL[lev - 1], SynchList_pre, Symmetry,
+                     Parallel::SYNC_SITE_RP_COARSE_TEMP);
 
       Ppc = GH->PatL[lev - 1];
       while (Ppc)
@@ -2574,7 +2643,8 @@ void bssn_class::RestrictProlong(int lev, int YN, bool BB)
         cout << "===: " << GH->Lt[lev - 1] << "," << GH->Lt[lev] + dT_lev << endl;
       Parallel::Restrict(GH->PatL[lev - 1], GH->PatL[lev], SynchList_cor, StateList, Symmetry);
 
-      Parallel::Sync(GH->PatL[lev - 1], StateList, Symmetry);
+      Parallel::Sync(GH->PatL[lev - 1], StateList, Symmetry,
+                     Parallel::SYNC_SITE_RP_COARSE_STATE);
 
       Ppc = GH->PatL[lev - 1];
       while (Ppc)
@@ -2589,7 +2659,8 @@ void bssn_class::RestrictProlong(int lev, int YN, bool BB)
       }
     }
 
-    Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry);
+    Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry,
+                   Parallel::SYNC_SITE_RP_FINE);
   }
 }
 
@@ -2646,10 +2717,12 @@ void bssn_class::ProlongRestrict(int lev, int YN, bool BB)
 
       Parallel::Restrict_after(GH->PatL[lev - 1], GH->PatL[lev], SynchList_cor, StateList, Symmetry);
 
-      Parallel::Sync(GH->PatL[lev - 1], StateList, Symmetry);
+      Parallel::Sync(GH->PatL[lev - 1], StateList, Symmetry,
+                     Parallel::SYNC_SITE_PR_COARSE_STATE);
     }
 
-    Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry);
+    Parallel::Sync(GH->PatL[lev], SynchList_cor, Symmetry,
+                   Parallel::SYNC_SITE_PR_FINE);
   }
 }
 #undef MIXOUTB
@@ -2705,7 +2778,7 @@ void bssn_class::Compute_Psi4(int lev)
     Pp = Pp->next;
   }
 
-  Parallel::Sync(GH->PatL[lev], DG_List, Symmetry);
+  Parallel::Sync(GH->PatL[lev], DG_List, Symmetry, Parallel::SYNC_SITE_PSI4);
 
 
   DG_List->clearList();
@@ -3275,7 +3348,8 @@ void bssn_class::Constraint_Out()
           Pp = Pp->next;
         }
       }
-      Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry);
+      Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry,
+                     Parallel::SYNC_SITE_CONSTRAINT_OUT);
     }
 
     double ConV[7];
@@ -3384,7 +3458,8 @@ void bssn_class::Interp_Constraint(bool infg)
           Pp = Pp->next;
         }
       }
-      Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry);
+      Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry,
+                     Parallel::SYNC_SITE_INTERP_CONSTRAINT);
     }
   }
   //    interpolate
@@ -3530,7 +3605,8 @@ void bssn_class::Compute_Constraint()
         Pp = Pp->next;
       }
     }
-    Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry);
+    Parallel::Sync(GH->PatL[lev], ConstraintList, Symmetry,
+                   Parallel::SYNC_SITE_COMPUTE_CONSTRAINT);
   }
   // prolong restrict constraint quantities
   for (lev = GH->levels - 1; lev > 0; lev--)
@@ -3587,7 +3663,8 @@ void bssn_class::testRestrict()
   }
 
   Parallel::Restrict(GH->PatL[lev - 1], GH->PatL[lev], DG_List, DG_List, Symmetry);
-  Parallel::Sync(GH->PatL[lev - 1], DG_List, Symmetry);
+  Parallel::Sync(GH->PatL[lev - 1], DG_List, Symmetry,
+                 Parallel::SYNC_SITE_TEST_RESTRICT);
 
   Parallel::Dump_Data(GH->PatL[lev - 1], DG_List, 0, PhysTime, dT);
   Parallel::Dump_Data(GH->PatL[lev], DG_List, 0, PhysTime, dT);
@@ -3657,7 +3734,8 @@ void bssn_class::testOutBd()
     Ppc = Ppc->next;
   }
 
-  Parallel::Sync(GH->PatL[lev], DG_List, Symmetry);
+  Parallel::Sync(GH->PatL[lev], DG_List, Symmetry,
+                 Parallel::SYNC_SITE_TEST_OUTBD);
 
   Parallel::Dump_Data(GH->PatL[lev], DG_List, 0, PhysTime, dT);
   Parallel::Dump_Data(GH->PatL[lev - 1], DG_List, 0, PhysTime, dT);

@@ -3780,3 +3780,562 @@ wall_max 为1.1926 s，后段稳定约1.24--1.26 s；单步 Body wall 多数约
    `fdderivs/fderivs` 的向量化方向，避免已回退的循环拆分和 O15 串行段并行化。
 3. 若继续优化 TwoPuncture，优先研究 LineRelax 稀疏矩阵中三对角元素位置预计算；
    该方向只影响初值阶段，不会降低每个演化步耗时。
+
+### R56：固定六阶 owner-local 插值 apply kernel
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：O55 后的 `global_interp_apply` 仍使用运行时 `ORDN`，ARM 汇编中
+包含动态尺寸临时数组和两次清零。尝试为当前固定 `ghost_width=3`、`ORDN=6`
+增加固定尺寸 kernel，保持 `k-j-i`、`j-i`、`i` 三段归约顺序不变。
+
+修改文件和关键位置：候选曾在 `src/fmisc.f90` 增加固定大小的
+`global_interp_apply6`，并通过 `src/fmisc.h`、`src/MPatch.C` 仅接入
+owner-local 路径；本条记录写入时源码改动已回退。
+
+A/B 测试（计算节点、`t=2`、30 MPI x 2 OMP、owner-local 16线程，同一作业内
+baseline/candidate 交替运行）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| O55 Total Evolve | 27.2070 s | 26.4246 s | 25.9108 s | 26.4246 s |
+| fixed-six Total Evolve | 27.3000 s | 27.6391 s | 25.7745 s | 27.3000 s |
+| O55 AnalysisStuff 平均值 | 1.5307 s | 1.4627 s | 1.4800 s | 1.4800 s |
+| fixed-six AnalysisStuff 平均值 | 1.4837 s | 1.5104 s | 1.4448 s | 1.4837 s |
+
+端到端中位数慢 **3.31%**，目标阶段中位数慢0.25%，固定尺寸没有可确认收益。
+三轮四个关键 `.dat` 文件去除创建时间戳后均位级一致；checker 为
+trajectory RMS=0，`Ham=0.22284017, Px=0.020397406, Py=0.0074058059,
+Pz=0.0090000732`，`FINAL: PASS`。
+
+决定与下一步：回退。编译器已充分向量化运行时阶数循环，固定尺寸还生成了更大
+的分支展开代码。下一项只消除非对称边界点上恒等 `SoA=1` 乘法，保留现有通用
+kernel 和归约顺序。
+
+### R57：非对称边界点跳过单位符号乘法
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：O55 的 apply kernel 为每个 stencil 值执行
+`sx(i)*sy(j)*sz(k)`；当三轴 stencil 起点均为正时三者恒为1。候选仅为这些点
+增加无符号因子的快路径，跨对称边界点和三段归约顺序保持不变。
+
+A/B 测试（计算节点、`t=2`、30 MPI x 2 OMP、owner-local 16线程，同一作业内
+baseline/candidate 交替运行）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| O55 Total Evolve | 22.4701 s | 22.4986 s | 22.4866 s | 22.4866 s |
+| no-sign fast path | 22.6431 s | 22.5612 s | 22.7875 s | 22.6431 s |
+| O55 AnalysisStuff 平均值 | 1.2188 s | 1.2005 s | 1.2669 s | 1.2188 s |
+| no-sign AnalysisStuff 平均值 | 1.2175 s | 1.1633 s | 1.2636 s | 1.2175 s |
+
+目标阶段中位数仅快0.11%，远小于波动；端到端中位数慢0.70%。三轮四个关键
+`.dat` 文件去除创建时间戳后位级一致；checker 为 trajectory RMS=0，
+`Ham=0.22284017, Px=0.020397406, Py=0.0074058059, Pz=0.0090000732`，
+`FINAL: PASS`。
+
+决定与下一步：回退。单位符号乘法不是 O55 后的主要开销。下一项预计算完整
+三维 stencil 线性偏移并跨变量复用，减少每个变量重复的多维地址运算。
+
+### R58：跨变量复用三维 stencil 线性偏移
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：O55 只复用了三轴系数和 stencil 起点，每个变量仍重复将216个
+三维索引映射为线性地址。候选在每个表面点预计算线性偏移和对称镜像掩码，17个
+变量通过偏移直接取值；分离式插值和每个变量的归约顺序保持不变。
+
+A/B 测试（计算节点、`t=2`、30 MPI x 2 OMP、owner-local 16线程，同一作业内
+baseline/candidate 交替运行）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| O55 Total Evolve | 22.3926 s | 22.3593 s | 22.5098 s | 22.3926 s |
+| offset reuse Total Evolve | 22.3598 s | 22.6301 s | 22.7306 s | 22.6301 s |
+| O55 AnalysisStuff 平均值 | 1.1618 s | 1.1617 s | 1.2014 s | 1.1618 s |
+| offset reuse AnalysisStuff 平均值 | 1.1469 s | 1.2163 s | 1.2659 s | 1.2163 s |
+
+端到端中位数慢 **1.06%**，目标阶段中位数慢4.69%。三轮四个关键 `.dat`
+文件去除创建时间戳后位级一致；checker 为 trajectory RMS=0，
+`Ham=0.22284017, Px=0.020397406, Py=0.0074058059, Pz=0.0090000732`，
+`FINAL: PASS`。
+
+决定与下一步：回退。每线程新增的偏移/掩码数组及其读取成本超过了地址计算收益。
+O55 后继续微调表面 apply 已连续三次无收益，下一轮回到占每步约11秒的
+`RecursiveStep`，重新采样差分 kernel 后再选单一向量化方向。
+
+## 下一步
+
+1. 重新对 O55 的 `RecursiveStep` 做 perf 采样，区分实际计算热点与
+   `opal_progress`/MPI 等待；旧采样早于 O50 的 affinity 修复，比例不能直接沿用。
+2. 差分 kernel 已有 R6、O45、O46、O47 等明确负结果；除非新采样出现新的
+   未向量化证据，否则不再做循环拆分、清零融合、Ricci 融合或共享缓存。
+3. 若 MPI wait 仍占主要比例，优先分析每步约1100次 Waitall 的消息尺寸分布及
+   是否存在可合并的同邻居交换；保持现有 unbound + `mpi_yield_when_idle=1`。
+
+### R59：GNU 构建强制链接 GCC libgomp
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：O55 新采样 `test_archives/perf_20260820_071522` 零丢样，IPC=1.91、
+cache miss=1.34%；`kmp_flag_64::wait` self 占29.80%，高于
+`compute_rhs_bssn` 10.26%、`lopsided_kodis` 7.86% 和 `fdderivs` 5.36%。检查
+新构建发现，课程环境的 `LIBRARY_PATH` 优先包含 Arm Compiler 目录，使 CMake
+将 `OpenMP_gomp_LIBRARY` 解析到其中的 `libgomp.so -> libomp.so` 兼容链接，
+最终 `ABE` 的 ELF 依赖为 LLVM `libomp.so`，而旧构建依赖 GNU `libgomp.so.1`。
+
+候选曾在 `CMakeLists.txt` 中清除 `LIBRARY_PATH`/`LD_LIBRARY_PATH` 后调用活动
+GNU C++ 编译器的 `-print-file-name=libgomp.so`，并将结果强制交给
+`FindOpenMP`。计算节点验证基线依赖 `libomp.so`，候选依赖 `libgomp.so.1`；本条
+记录写入时 CMake 改动已回退。
+
+A/B 测试（计算节点、`t=2`、30 MPI x 2 OMP、owner-local 16线程，同一作业内
+按 baseline/candidate、candidate/baseline、baseline/candidate 顺序运行）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| Arm `libomp` Total Evolve | 24.0865 s | 24.3511 s | 24.3841 s | 24.3511 s |
+| GNU `libgomp` Total Evolve | 24.0836 s | 25.5363 s | 25.4893 s | 25.4893 s |
+| Arm `libomp` RecursiveStep 平均值 | 11.7617 s | 11.9018 s | 11.9147 s | 11.9018 s |
+| GNU `libgomp` RecursiveStep 平均值 | 11.7070 s | 12.3393 s | 12.4497 s | 12.3393 s |
+| Arm `libomp` AnalysisStuff 平均值 | 1.4356 s | 1.4566 s | 1.4913 s | 1.4566 s |
+| GNU `libgomp` AnalysisStuff 平均值 | 1.4098 s | 1.4613 s | 1.3642 s | 1.4098 s |
+
+GNU `libgomp` 的 Total Evolve 中位数慢 **4.67%**，RecursiveStep 中位数慢
+3.68%；AnalysisStuff 虽快3.21%，不足以抵消主演化退化。Program Cost 中位数
+也由28.6453 s增至29.9942 s，慢4.71%。六轮 checker 均 PASS，trajectory
+RMS=0；Grid Level 0 为 `Ham=0.22284017, Px=0.020397406, Py=0.0074058059,
+Pz=0.0090000732`。
+
+决定与下一步：回退。`libomp` 中的 barrier wait 是线程让出 CPU 的时间，在当前
+unbound + MPI yield 配置下会为其他 rank 和 MPI progress 提供运行机会；高采样
+占比不代表替换 runtime 后可转化为墙钟收益。后续保留当前自动解析到的 Arm
+`libomp`，不再把 OpenMP wait self 比例直接当作计算热点。
+
+## 下一步
+
+1. 使用新采样中的真实计算热点继续分析 `compute_rhs_bssn`、
+   `lopsided_kodis` 和 `fdderivs`，但排除 R6/O45/O46/O47 已验证失败的循环拆分、
+   清零融合、Ricci 融合和共享缓存方向。
+2. 对 MPI wait 优先做消息尺寸、邻居和 `Parallel::Sync` 调用点分布统计；当前 Sync
+   在发起非阻塞通信后立即等待，进一步形成大粒度计算/通信重叠需要把 stencil
+   拆成 interior 与 boundary 两段，属于高风险重构，必须先确认主要消息调用点。
+3. 单独统计阻塞 `MPI_Allreduce` 等 collective 的墙钟开销，避免将从 collective
+   转移到 ghost Waitall 的等待时间误判为通信退化；保持 `libomp`、unbound 和
+   `mpi_yield_when_idle=1` 的组合不变。
+
+### R60：MPI_Waitsome 完成即解包
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：每个演化步约有1130--1190次 ghost `MPI_Waitall`，各 rank 汇总
+传输约23--25 GiB，平均每 rank 每步等待约2.2 s。原 `Parallel::Sync` 使用
+`MPI_Isend`/`MPI_Irecv`，但随即一次 `MPI_Waitall`，所有消息完成后才统一解包，
+没有与主演化计算重叠。
+
+修改文件和关键位置：候选曾在 `src/Parallel.C` 中用循环 `MPI_Waitsome` 替换
+`MPI_Waitall`，接收消息完成后立即解包，使 CPU 解包与其余在途通信重叠；记录
+写入时该源码改动已回退。
+
+A/B 测试（计算节点、`t=2`、30 MPI x 2 OMP，同一作业内三轮配对运行）：
+
+| 版本 | Total Evolve 中位数 | 相对 O55 |
+|------|--------------------:|---------:|
+| O55 baseline | 25.0587 s | - |
+| Waitsome early unpack | 26.3840 s | 慢5.29% |
+
+六轮 checker 均 PASS，trajectory RMS=0；四个主要 `.dat` 文件除时间戳外文本
+位级一致。候选 MPI wait 中位数也上升，没有产生有效的解包/通信重叠收益。
+
+决定与下一步：回退。大量 `Waitsome` progress 调用和分批完成处理的开销超过潜在
+重叠收益；不再沿用逐消息完成即解包方向。
+
+### R61：先发布全部 Irecv 再打包发送
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：原 Sync 按节点依次打包、发布接收并发送。候选先发布全部
+`MPI_Irecv`，再打包和 `MPI_Isend`，尝试让入站通信在本 rank 处理发送缓冲期间
+取得进展，同时仍保持一次 `MPI_Waitall` 和原节点顺序解包。
+
+修改文件和关键位置：候选仅修改 `src/Parallel.C` 中 ghost exchange 请求发布
+顺序；记录写入时该源码改动已回退。
+
+A/B 测试（计算节点、`t=2`、30 MPI x 2 OMP，同一作业内三轮配对运行）：
+
+| 版本 | Total Evolve 中位数 | 相对 O55 |
+|------|--------------------:|---------:|
+| O55 baseline | 23.8921 s | - |
+| receive-first | 24.0303 s | 慢0.58% |
+
+MPI wait 基本不变；六轮 checker 均 PASS，trajectory RMS=0，主要输出除时间戳外
+位级一致。
+
+决定与下一步：回退。发送打包窗口不足以形成可测量的通信重叠，额外遍历请求描述
+反而轻微变慢。
+
+### O62：错误归约与 ghost Sync 重叠
+
+状态：**保留**。
+
+日期：2026-08-20。
+
+profiler 证据：`Step()` 在 predictor 和每个 corrector 后先执行标量错误状态的
+阻塞 `MPI_Allreduce`，再进入 ghost `Parallel::Sync`。这会让较快 rank 在归约中
+等待最慢 rank，之后所有 rank 才开始发布 ghost 请求。候选将归约改为
+`MPI_Iallreduce`，在归约在途时执行原有 Sync，Sync 返回后再等待归约并保持原
+错误处理语义。每处 Sync 仍只执行一次。
+
+修改文件和关键位置：`src/bssn_class.C` 的 predictor 和 corrector 错误检查；
+用 `MPI_Iallreduce` + `Parallel::Sync` + `MPI_Wait` 替换阻塞归约后再 Sync。
+
+短跑 A/B（计算节点、`t=2`、30 MPI x 2 OMP，同一作业内三轮配对运行）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| O55 Total Evolve | 24.0764 s | 24.1449 s | 24.3817 s | 24.1449 s |
+| O62 Total Evolve | 24.3082 s | 23.7783 s | 24.0169 s | 24.0169 s |
+
+短跑端到端中位数快0.53%，RecursiveStep 中位数也快约0.53%。六轮 checker
+均 PASS，trajectory RMS=0，主要输出除时间戳外位级一致。
+
+正式 `t=40` 同一 allocation A/B：baseline `Total Evolve=477.734 s`、
+`Program Cost=481.633800 s`、RecursiveStep 平均11.738470 s；O62 分别为
+474.877 s、479.039706 s、11.667455 s。Total Evolve 快2.857 s，即 **0.60%**，
+Program Cost 快0.54%。O62 的已记录 ghost MPI wait 从1.813765 s升至
+2.543895 s，是原本未单独计时的 Allreduce 等待转移到 Sync Waitall 的结果，
+不能单独解释为退化。
+
+正确性结果：使用与输出相同 `t<40` 范围的临时 golden 检查，trajectory 40/40
+matched、RMS=0；Grid Level 0 为 `Ham=0.27739667, Px=0.028132512,
+Py=0.031488238, Pz=0.026503396`，`FINAL: PASS`。baseline/candidate 四个主要
+`.dat` 文件除时间戳外位级一致。
+
+决定与下一步：保留。该改动利用已有 collective 与 ghost exchange 的自然相邻
+关系形成有限重叠，不改变数值顺序，并在正式长跑确认0.60%收益。进一步重叠不能
+只调整 MPI 请求顺序，需要先定位高成本 Sync，再评估 interior/boundary 拆分。
+
+### O63：TwoPuncture 主循环改为连续 `i` 内层遍历
+
+状态：**保留**。
+
+日期：2026-08-20。
+
+profiler 证据：30线程 TwoPuncture 中 `LineRelax_be/al` 与 `ThomasAlgorithm`
+合计约85%，但 `F_of_v`、`J_times_dv` 和 `SetMatrix_JFD` 仍是求解器反复执行的
+全网格路径。`Index` 的布局为
+`ivar + nvar * (i + n1 * (j + n2 * k))`，原 `i-j-k` 循环以内层 `k` 跨
+`n1*n2` 访问；改为 `k-j-i` 后，内层 `i` 与存储布局连续。
+
+修改文件和关键位置：
+- `src/TwoPunctures.C`：仅将 `F_of_v`、`J_times_dv` 的活动全网格循环，以及
+  `SetMatrix_JFD` 的清零和主列遍历，从 `i-j-k` 改为 `k-j-i`。
+- `SetMatrix_JFD` 的局部 `3x3x3` 邻域枚举保持原顺序，避免同时引入第二项
+  稀疏装配顺序变化；公式、索引和 OpenMP 划分均未改变。
+
+无 TwoPuncture cache 的计算节点配对 A/B（30线程、`close/cores`，运行顺序
+baseline/candidate、candidate/baseline、baseline/candidate）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| baseline `i-j-k` | 70.414 s | 71.307 s | 71.409 s | 71.307 s |
+| O63 `k-j-i` | 69.821 s | 69.952 s | 70.159 s | 69.952 s |
+
+候选三组配对均更快，中位数减少1.355秒，即 **1.90%**（1.019x）。由于该项只
+影响初值阶段，对当前约552秒的完整 Program Cost 预期收益约0.25%。原始数据在
+`test_archives/ab_20260820_084610_twop_kji/`。
+
+收敛与数值影响：
+- 两个版本的 `puncture_parameters_new.txt` 位级一致，裸质量和ADM质量相同。
+- 稀疏列插入顺序变化引起预期的浮点差异；`Ansorg.psid` 数值区相对 RMS 为
+  `5.925e-13`，最大绝对差为`2.372e-14`。
+- Newton各阶段仍均为一次迭代；候选总 BiCGStab 日志迭代数为96，baseline为97，
+  因而收益同时包含连续访存和确定性地少一次线性迭代，不能全部归因于cache局部性。
+
+正式正确性：候选使用无cache完整 `t=40` 流水线，`Total Evolve=476.139 s`、
+`ABE Total Running=479.648 s`、`This Program Cost=551.815844 s`。以相同 `t<40`
+时间范围检查，trajectory 40/40 matched、RMS=0；Grid Level 0 为
+`Ham=0.27739667, Px=0.028132512, Py=0.031488238, Pz=0.026503396`，`FINAL: PASS`。
+直接对100步完整 golden 检查只会因覆盖40/100失败，不是数值误差。正式归档在
+`test_archives/full_20260820_085533_twop_kji/`。
+
+决定与下一步：保留。该优化范围单一、三组配对方向一致，并通过正式长跑正确性。
+
+### O64：按调用点统计 `Parallel::Sync` 通信量与 Waitall 时间
+
+状态：**保留（诊断功能，默认关闭）**。
+
+日期：2026-08-20。
+
+profiler 证据：已有聚合诊断显示每步约1130--1400次 `MPI_Waitall`、全 rank
+合计约24--26 GiB，但无法区分 RK stencil Sync、AMR restrict/prolong Sync 和分析
+路径。本次只增加调用点归因，不调整 `MPI_Isend/Irecv/Waitall` 的顺序，也不改变
+任何计算路径。
+
+修改文件和关键位置：
+- `src/Parallel.h`、`src/Parallel.C`：增加固定 `SyncSite` 枚举和定长本地计数器；
+  将 site ID 从两个 `Sync` overload 传到 `transfer`，记录逻辑 Sync 次数、Waitall
+  次数、request 数、double 元素数、累计等待和最长单次等待。
+- `src/bssn_class.C`：为 CPU 路径22个语义调用点加标签，每个 evolution step
+  结束时用固定次数 `MPI_Reduce` 汇总；只在
+  `AMSS_SYNC_SITE_DIAGNOSTICS=1` 时执行。
+- `run.sh`：记录并显式传递该环境开关，默认值为0。关闭时不取时间、不更新
+  site 计数、不执行额外 collective；热路径只多一个缓存布尔判断和整数参数。
+
+计算节点代表性诊断（`t=2`、TwoPuncture cache、30 MPI x 2 OMP，job 123843，
+归档 `test_archives/hybrid_20260820_091554/`）：
+
+| 调用点 | 逻辑 calls/step | Waitalls/rank/step | requests 全 rank/step | 流量全 rank/step | rank 平均 Waitall（两步范围） |
+|--------|----------------:|-------------------:|------------------------:|-------------------:|-------------------------------:|
+| `rk_corrector` | 198 | 492 | 96,516 | 9,915.64 MiB | 0.587--0.613 s |
+| `rp_args_fine` | 65 | 162 | 32,092 | 3,297.13 MiB | 0.458--0.474 s |
+| `rk_predictor` | 66 | 164 | 32,172 | 3,305.21 MiB | 0.231--0.234 s |
+| `rp_args_coarse_temp` | 31 | 62 | 20,900 | 1,512.53 MiB | 0.0524--0.0526 s |
+| `rp_args_coarse_state` | 34 | 68 | 22,444 | 1,583.96 MiB | 0.0499--0.0499 s |
+| `constraint_out` | 9 | 19 | 5,316 | 97.27 MiB | 0.0291--0.0293 s |
+
+`fill_future` 和 `fill_temp` 只在第2步各出现一次，各54.11 MiB、平均等待不超过
+0.0021秒；`psi4` 每步不足1 MiB。未列出的 site 在该短跑未执行。聚合统计仍包含
+非 Sync 的 `transfer`，因此总量约23.3--23.5 GiB/step，大于上表 Sync site 之和，
+这不是漏记 Sync。
+
+本项是定位实验而非候选加速，没有用带诊断的 wall time 作保留判断，也不需要三轮
+A/B。诊断关闭是正式运行默认值，新增路径不会执行计时或汇总。开启诊断的代表性
+运行 `Total Evolve=22.7087 s`，仅用于确认功能和采样覆盖。
+
+正确性结果：当前配置的 `File_directory` 为 `GW2.0118`，因此绕过
+`quick_test.sh` 硬编码的旧 `GW250118` 检查路径，对本次实际输出重新执行
+`./check.sh GW2.0118/AMSS_NCKU_output golden_cpu`。trajectory 2/2 matched、RMS=0；
+Grid Level 0 为
+`Ham=0.22284017, Px=0.020397406, Py=0.0074058059, Pz=0.0090000732`，
+`FINAL: PASS`。`bssn_BH.dat`、`bssn_ADMQs.dat`、`bssn_constraint.dat` 与O63正式
+结果在 `t<2` 范围位级一致；`bssn_psi4.dat` 只有既有 owner-local OpenMP 归约的
+末位浮点差异。
+
+决定与下一步：保留默认关闭的低开销诊断。`rk_corrector` 是明确首选目标：其每步
+流量约为 predictor 的3倍，并贡献最大的 rank 平均 Waitall；下一项只针对该路径
+验证 post ghost -> stencil interior -> wait -> boundary 的可行性。必须先确认
+`compute_rhs_bssn` 的 interior/boundary 接口范围，并单独测量 OpenMPI 在 interior
+计算期间是否有通信 progress，避免重现O15的线程饥饿。
+
+## 下一步
+
+1. 以 O64 定位的 `rk_corrector` 为唯一目标，先梳理 `compute_rhs_bssn` 的 stencil
+   读写范围和可安全独立计算的 interior；不要同时修改 predictor 或 AMR Sync。
+2. 做最小 progress 探针：post corrector ghost 后仅计算 interior，记录请求完成度
+   和残余 wait；若 OpenMPI 无异步 progress，则停止该方向，不引入 progress thread。
+3. 只有 progress 证据成立才实现完整 interior/wait/boundary A/B，并做至少三轮配对
+   与正确性检查；任何边界次序变化都需与 O63 正式输出比较。
+4. 对 `compute_rhs_bssn`、`lopsided_kodis` 和 `fdderivs` 分别生成编译器向量化
+   报告；除非出现新的未向量化证据，不重试循环拆分、Ricci融合或共享缓存。
+
+### R65：预分类 LineRelax 稀疏槽位
+
+状态：**已回退（计时无效）**。
+
+日期：2026-08-20。
+
+profiler 证据：`LineRelax_be/al` 与 `ThomasAlgorithm` 合计约占30线程
+TwoPuncture 的85%。候选在每次 `SetMatrix_JFD` 后预分类两种线方向的三对角槽位
+和非线槽位，保持非线乘减的原始顺序，避免200次 relaxation 中反复比较列号。
+
+修改文件和关键位置：候选曾修改 `src/TwoPunctures.C/.h` 的 `bicgstab`、
+`relax` 和 `LineRelax_be/al`；记录时已完整回退，O63 的 `k-j-i` 顺序保留。
+
+初次三轮结果为 baseline 71.254/71.425/72.668秒，candidate
+73.600/73.630/74.000秒，但事后 ELF 检查发现 baseline 链接 Arm `libomp.so`，
+candidate 链接 GNU `libgomp.so.1`，违反单变量 A/B，不能用来量化候选性能。
+两者收敛日志和 puncture 参数一致，`Ansorg.psid` 仅时间戳不同。
+
+决定与下一步：回退但不把3.09%表观退化当作有效结论。此项暴露出复用旧二进制
+做A/B的风险；后续候选均从同一新CMake cache构建，并用 `ldd` 验证相同 runtime。
+
+### R66：ThomasAlgorithm 保存逆主元
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：Thomas前向和回代每行约执行两次依赖除法。候选保存主元倒数，使
+回代由除法改为乘法。使用同一 GNU 14.2 + Arm `libomp` 构建的三轮无cache配对：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| O63 baseline | 71.409 s | 71.924 s | 71.748 s | 71.748 s |
+| inverse pivot | 72.407 s | 72.022 s | 71.872 s | 72.022 s |
+
+候选慢0.38%；倒数表示改变舍入并使总BiCGStab日志多一次迭代。决定：回退。
+
+### R67/R68：减少 BiCGStab relaxation 次数
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：每个预条件器应用固定执行 `NRELAX=200`，直接决定主要线松弛工作量。
+分别隔离测试100和150，均使用与baseline相同的 GNU 14.2 + Arm `libomp`：
+
+| 候选 | baseline 中位数 | candidate 中位数 | 结果 |
+|------|----------------:|-----------------:|-----:|
+| `NRELAX=100` | 72.024 s | 85.137 s | 慢18.20% |
+| `NRELAX=150` | 75.409 s | 79.370 s | 慢5.25% |
+
+100次时正BiCGStab迭代由84增至125，预条件器变弱带来的迭代增长超过单次节省；
+150次三组配对也不稳定且中位数退化。两项均回退，不再减少该参数。
+
+### O69：增强 BiCGStab 预条件器至250次 relaxation
+
+状态：**保留**。
+
+日期：2026-08-20。
+
+profiler 证据：R67/R68显示200以下存在预条件强度阈值，因此隔离测试反方向的
+`NRELAX=250`，验证增加单次工作能否减少总Krylov迭代。
+
+修改文件和关键位置：`src/TwoPunctures.h` 将 `NRELAX` 从200改为250；物理参数、
+Newton容差、公式和并行划分均未改变。
+
+无cache计算节点A/B（30线程、相同 GNU 14.2 + Arm `libomp`，交替顺序）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| O63 baseline | 71.816 s | 72.675 s | 73.308 s | 72.675 s |
+| `NRELAX=250` | 70.155 s | 70.613 s | 71.334 s | 70.613 s |
+
+三组配对均更快，中位数减少2.062秒，即 **2.84%**（1.029x）。正BiCGStab
+迭代由84降至76，最终Newton残差由`2.393039e-13`降至`1.497452e-13`。
+`puncture_parameters_new.txt` 位级一致；`Ansorg.psid` 数值区相对RMS
+`4.669e-13`，最大绝对差`1.832e-14`。
+
+端到端无cache `t=2` 验证（job 124446）：`Total Evolve=24.1824 s`，trajectory
+2/2 matched并通过0.1%门槛，constraints全部小于2，`FINAL: PASS`。归档：
+`test_archives/ab_20260820_110008_twop_nrelax250/` 和
+`test_archives/validate_20260820_110836_nrelax250/`。
+
+正式无cache `t=40` 验证（job 124526）：`Total Evolve=488.698 s`，
+`Program Cost=562.281412 s`。trajectory 40/40 matched、RMS=0；level-0
+`Ham=0.27739667, Px=0.028132512, Py=0.031488238, Pz=0.026503396`，
+`FINAL: PASS`。本次是正确性和正式成本确认，不是同allocation演化A/B；O69的
+2.84%初值收益结论仍来自上面的三轮配对。正式归档：
+`test_archives/formal_20260820_112340_nrelax250/`。
+
+决定与下一步：保留。该项改善约70秒的初值阶段，对约552秒正式总时长预期贡献
+约0.37%；进一步主要收益仍需来自每步重复的 RecursiveStep，而非继续微调初值。
+
+### O70：compile.sh 使 OpenMP runtime cache 失效并重新探测
+
+状态：**保留**。
+
+日期：2026-08-20。
+
+证据：正常 `./compile.sh` 复用的 `build/CMakeCache.txt` 仍保存 R59 实验期间的绝对
+路径 `/usr/lib/gcc/aarch64-linux-gnu/14/libgomp.so`，导致当前 `ABE` 和
+`TwoPunctureABE` 实际链接 `libgomp.so.1`。R59 已用三轮端到端配对证明，在本项目
+unbound + MPI yield 配置下，GNU runtime 的 Total Evolve 中位数比自动探测到的
+Arm `libomp` 慢 **4.67%**。
+
+修改文件和关键位置：`compile.sh` 在每次 CMake configure 时加入
+`-UOpenMP_gomp_LIBRARY`，只清除 FindOpenMP 缓存的绝对库路径，再按当前工具链和
+环境重新探测；不硬编码厂商路径，在无Arm runtime的平台仍会正常选择GNU库。
+
+验证：在原受污染的 `build/` 上直接执行 `./compile.sh` 后，两个ELF均由
+`libgomp.so.1` 改为 `libomp.so`，无需删除整个build目录。编译成功，O69端到端
+正确性已在同一 `libomp` runtime 下 `FINAL: PASS`。
+
+决定与下一步：保留。这不是新的算法加速，而是确保已验证的R59结论在增量构建和
+OJ构建中真正生效，避免约4.7%的稳定性能损失重新出现。
+
+## 下一步
+
+1. 对 O64 定位的 `rk_corrector` 做最小 MPI progress 探针；只有 interior 计算期间
+   请求确有进展，才投入完整 interior/wait/boundary 重构。
+2. 生成 `compute_rhs_bssn`、`lopsided_kodis`、`fdderivs` 的逐循环向量化报告，
+   只处理有明确 missed-vectorization 原因且不属于既有失败方向的循环。
+3. 下次正式性能比较必须在同一allocation内配对；本次单次488.698秒不能与历史
+   476--493秒的不同节点运行直接归因到某一优化。
+
+### R71：将 bssn_rhs alias-versioning 上限提高到32
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler/编译器证据：O55后的采样中 `compute_rhs_bssn` self约10.3%，是最大的
+纯计算热点。GNU 14.2 `-fopt-info-vec-all` 显示 `bssn_rhs.f90` 有45处循环因
+默认 `vect-max-version-for-alias-checks=10` 达到上限而未向量化；这些循环使用多个
+assumed-shape数组，编译器可以生成运行时不重叠检查后选择SIMD或标量版本。
+
+候选只对 GNU Fortran 的 `src/bssn_rhs.f90` 设置
+`--param=vect-max-version-for-alias-checks=32`，没有修改公式、循环结构或其他源文件。
+报告中向量化循环由118增至157，alias上限失败由45降至6。
+
+计算节点 `t=2` 三轮交替配对（TwoPuncture cache、30 MPI x 2 OMP、诊断关闭）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| O70 baseline | 24.2375 s | 24.1672 s | 24.2554 s | 24.2375 s |
+| alias checks 32 | 24.5076 s | 24.3338 s | 24.0607 s | 24.3338 s |
+
+候选中位数慢0.40%，三组中仅一组更快。六轮checker均 `FINAL: PASS`、trajectory
+RMS=0。决定：回退。小AMR patch上最多32个运行时指针比较的分派成本超过额外SIMD
+收益；不保留32，但继续测试更克制的上限16。
+
+### O72：将 bssn_rhs alias-versioning 上限提高到16
+
+状态：**保留**。
+
+日期：2026-08-20。
+
+profiler/编译器证据：与R71相同，但将运行时alias检查上限限制为16。最终报告中
+`bssn_rhs.f90` 向量化循环由118增至151，alias上限失败由45降至12；相比32只少
+6个向量化循环，但显著减少最复杂循环的分派检查。
+
+修改文件和关键位置：`CMakeLists.txt` 仅为 GNU Fortran 的
+`src/bssn_rhs.f90` 添加
+`--param=vect-max-version-for-alias-checks=16`。运行时检查失败时仍执行原标量循环；
+其他Fortran kernel、C++、浮点选项和源表达式不变。
+
+`t=2` 三轮交替配对的中位数为 baseline 24.2880秒、candidate 24.1418秒，候选
+快0.60%，但仅两组方向一致，因此扩大到 `t=10`：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| O70 baseline | 124.037 s | 123.633 s | 121.757 s | 123.633 s |
+| alias checks 16 | 123.694 s | 123.225 s | 120.670 s | 123.225 s |
+
+三组均更快，中位数减少0.408秒，即 **0.33%**。同一allocation正式 `t=40` A/B
+（job 125313）：baseline `Total Evolve=477.284 s`、`Program Cost=481.474239 s`；
+候选分别为`470.372 s`、`474.406944 s`。Total Evolve减少6.912秒，即 **1.45%**，
+Program Cost减少7.067秒，即1.47%。归档：
+`test_archives/ab_20260820_125754_bssn_alias16_t10/`、
+`test_archives/ab_20260820_133720_bssn_alias16_t40/`。
+
+正确性：六轮`t=10`和两轮正式`t=40`均 `FINAL: PASS`。正式轨迹40/40 matched、
+RMS=0；level-0 `Ham=0.27739667, Px=0.028132512, Py=0.031488238,
+Pz=0.026503396`。BH、ADM和constraint输出除时间戳外位级一致；psi4保留既有
+owner-local OpenMP归约的运行间末位差异。
+
+决定与下一步：保留。标准 `./compile.sh` 已重建并确认只有
+`bssn_rhs.f90.o` 带该参数，最终 `ABE` 继续链接Arm `libomp`。
+
+## 下一步
+
+1. 回到O64定位的 `rk_corrector`，实现不改计算结果的最小MPI progress探针：记录
+   post后计算窗口内完成的请求数和剩余Waitall时间，先证明平台是否异步推进。
+2. 只有progress证据成立才拆分 `compute_rhs_bssn` interior/boundary；该重构必须
+   保持RHS写入范围互斥，并先只覆盖corrector，不同时改predictor或AMR路径。
+3. 不再提高alias ceiling；32已证实运行时检查开销过高。`fdderivs`和
+   `lopsided_kodis` 的未向量化原因是边界控制流，不重试已失败的循环拆分。

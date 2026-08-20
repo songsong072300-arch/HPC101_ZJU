@@ -13,6 +13,7 @@
 #   AMSS_SURFACE_OMP_THREADS  threads for owner-local surface interp (default: 16, O8)
 #   AMSS_PHASE_TIMING        per-step wall/CPU/cgroup timing diagnostics (default: 1)
 #   AMSS_MPI_DIAGNOSTICS     per-step MPI Waitall diagnostics (default: 1)
+#   AMSS_SYNC_SITE_DIAGNOSTICS per-Sync-site MPI diagnostics (default: 0)
 #   AMSS_MPI_YIELD_WHEN_IDLE MPI polling policy (default: 1)
 #   AMSS_MPI_BIND_TO         Open MPI binding policy (default: none)
 #   AMSS_MPI_MAP_BY          Open MPI mapping policy (default: slot)
@@ -74,6 +75,7 @@ export AMSS_SURFACE_OMP_THREADS="16"
 # explicitly after rank placement has been confirmed.
 export AMSS_PHASE_TIMING="${AMSS_PHASE_TIMING:-1}"
 export AMSS_MPI_DIAGNOSTICS="${AMSS_MPI_DIAGNOSTICS:-1}"
+export AMSS_SYNC_SITE_DIAGNOSTICS="${AMSS_SYNC_SITE_DIAGNOSTICS:-0}"
 export AMSS_MPI_YIELD_WHEN_IDLE="${AMSS_MPI_YIELD_WHEN_IDLE:-1}"
 export AMSS_MPI_BIND_TO="${AMSS_MPI_BIND_TO:-none}"
 export AMSS_MPI_MAP_BY="${AMSS_MPI_MAP_BY:-slot}"
@@ -129,7 +131,7 @@ echo "==> Build    : $AMSS_BUILD_DIR"
 echo "==> Output   : $AMSS_OUTPUT_ROOT"
 echo "==> Cache    : $AMSS_CACHE_DIR"
 echo "==> MPI exec : $AMSS_MPIEXEC"
-echo "==> Diagnostics: phase=$AMSS_PHASE_TIMING mpi=$AMSS_MPI_DIAGNOSTICS"
+echo "==> Diagnostics: phase=$AMSS_PHASE_TIMING mpi=$AMSS_MPI_DIAGNOSTICS sync_site=$AMSS_SYNC_SITE_DIAGNOSTICS"
 echo "==> MPI policy: yield=$AMSS_MPI_YIELD_WHEN_IDLE map=$AMSS_MPI_MAP_BY bind=$AMSS_MPI_BIND_TO oversubscribe=$AMSS_MPI_OVERSUBSCRIBE"
 echo "==> Rank OpenMP: proc_bind=$OMP_PROC_BIND places=$rank_omp_places dynamic=$OMP_DYNAMIC"
 
@@ -157,6 +159,7 @@ exec env \
   AMSS_SURFACE_OMP_THREADS="$AMSS_SURFACE_OMP_THREADS" \
   AMSS_PHASE_TIMING="$AMSS_PHASE_TIMING" \
   AMSS_MPI_DIAGNOSTICS="$AMSS_MPI_DIAGNOSTICS" \
+  AMSS_SYNC_SITE_DIAGNOSTICS="$AMSS_SYNC_SITE_DIAGNOSTICS" \
   AMSS_MPI_YIELD_WHEN_IDLE="$AMSS_MPI_YIELD_WHEN_IDLE" \
   AMSS_MPI_BIND_TO="$AMSS_MPI_BIND_TO" \
   AMSS_MPI_MAP_BY="$AMSS_MPI_MAP_BY" \

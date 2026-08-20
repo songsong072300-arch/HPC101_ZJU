@@ -23,6 +23,34 @@ using namespace std;
 
 namespace Parallel
 {
+    enum SyncSite
+    {
+        SYNC_SITE_NONE = 0,
+        SYNC_SITE_RK_PREDICTOR,
+        SYNC_SITE_RK_CORRECTOR,
+        SYNC_SITE_RP_ARGS_COARSE_TEMP,
+        SYNC_SITE_RP_ARGS_COARSE_STATE,
+        SYNC_SITE_RP_ARGS_FINE,
+        SYNC_SITE_RP_AUX_COARSE_TEMP,
+        SYNC_SITE_RP_AUX_COARSE_STATE,
+        SYNC_SITE_RP_AUX_FINE,
+        SYNC_SITE_RP_COARSE_TEMP,
+        SYNC_SITE_RP_COARSE_STATE,
+        SYNC_SITE_RP_FINE,
+        SYNC_SITE_PR_COARSE_STATE,
+        SYNC_SITE_PR_FINE,
+        SYNC_SITE_PSI4,
+        SYNC_SITE_CONSTRAINT_OUT,
+        SYNC_SITE_INTERP_CONSTRAINT,
+        SYNC_SITE_COMPUTE_CONSTRAINT,
+        SYNC_SITE_TEST_RESTRICT,
+        SYNC_SITE_TEST_OUTBD,
+        SYNC_SITE_FILL_FUTURE,
+        SYNC_SITE_FILL_TEMP,
+        SYNC_SITE_FILL_COMBINED,
+        SYNC_SITE_COUNT
+    };
+
     struct CommDiagnostics
     {
         long long wait_calls;
@@ -33,6 +61,18 @@ namespace Parallel
     };
     void reset_comm_diagnostics();
     CommDiagnostics get_comm_diagnostics();
+    struct SyncSiteDiagnostics
+    {
+        long long sync_calls;
+        long long wait_calls;
+        long long requests;
+        long long elements;
+        double wait_total;
+        double wait_max;
+    };
+    void reset_sync_site_diagnostics();
+    SyncSiteDiagnostics get_sync_site_diagnostics(int site);
+    const char *sync_site_name(int site);
     struct gridseg
     {
         double llb[dim];
@@ -92,7 +132,7 @@ namespace Parallel
 #endif
     void transfer(MyList<gridseg> **src, MyList<gridseg> **dst,
                                 MyList<var> *VarList1 /* source */, MyList<var> *VarList2 /*target */,
-                                int Symmetry);
+                                int Symmetry, int sync_site = SYNC_SITE_NONE);
 #ifdef USE_GPU
     void gpu_transfer(
         MyList<gridseg> **src, MyList<gridseg> **dst,
@@ -105,8 +145,10 @@ namespace Parallel
     void transfermix(MyList<gridseg> **src, MyList<gridseg> **dst,
                                      MyList<var> *VarList1 /* source */, MyList<var> *VarList2 /*target */,
                                      int Symmetry);
-    void Sync(Patch *Pat, MyList<var> *VarList, int Symmetry);
-    void Sync(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry);
+    void Sync(Patch *Pat, MyList<var> *VarList, int Symmetry,
+              int sync_site = SYNC_SITE_NONE);
+    void Sync(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry,
+              int sync_site = SYNC_SITE_NONE);
     // O22: Split Sync for compute-communication overlap
     void Sync_Send(MyList<Patch> *PatL, MyList<var> *VarList, int Symmetry);
     void Sync_Recv();

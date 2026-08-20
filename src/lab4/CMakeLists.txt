@@ -42,6 +42,13 @@ set(AMSS_F90SOURCES
   src/sommerfeld_rout.f90
 )
 
+# The BSSN RHS has many disjoint assumed-shape arrays.  GCC's default limit
+# of 10 alias checks prevents vectorization of otherwise vectorizable loops;
+# retain scalar fallbacks and select SIMD only after runtime disjointness tests.
+set_property(SOURCE src/bssn_rhs.f90 APPEND PROPERTY COMPILE_OPTIONS
+  "$<$<COMPILE_LANG_AND_ID:Fortran,GNU>:--param=vect-max-version-for-alias-checks=16>"
+)
+
 # --- ABE: CPU main evolution executable -------------------------------------
 set(ABE_SOURCES
   src/ABE.C src/Ansorg.C src/Block.C src/MPatch.C src/Parallel.C
