@@ -3510,3 +3510,71 @@ O47（shared_fh_cache）短跑退化 7.3%，回退。
 
 **当前 O20+O26+O39 配置（t=40 Total Evolve 480.97s, Program Cost 554.45s）
 是此环境下 CPU 计算优化的最终性能天花板。**
+
+
+### O48：显式转发 ABE rank 的 OpenMP 亲和性
+
+状态：**保留**。
+
+日期：2026-08-20。
+
+profiler 证据：OJ 完整日志显示容器拥有 `Cpus_allowed_list=64-123`、
+`cpu.max=6000000 100000`，且没有 cgroup throttling；但 30 个 MPI rank 的
+`MPI rank placement` 全部是 `cpu64/cpu65`、`aff2`。每步 `IterationTotal`
+约 92--100 s，而 cgroup CPU 增量只有约 364--390 CPU-s，即平均仅使用约
+3.9 个 CPU。MPI Waitall 平均等待约 20--21 s。任务在 t=18 前被 OJ 的
+1740 s 限时终止。
+
+修改文件和关键位置：
+- `run.sh`：构造 `AMSS_MPIEXEC` 时通过 OpenMPI `-x` 显式转发
+  `OMP_PROC_BIND=false`、`OMP_PLACES=threads`、`OMP_DYNAMIC=FALSE`，避免 OJ
+  注入的 `close/cores` 在每个 rank 内把 affinity 收窄为 2 个 CPU。
+- `run.sh`：将 yield、map、bind、oversubscribe 和 rank OpenMP 策略做成
+  `AMSS_MPI_*` / `AMSS_OMP_*` 可配置项，并打印最终策略。
+
+A/B 测试结果：
+
+| 版本 | 样本 1 | 样本 2 | 样本 3 | 中位数 |
+|------|--------|--------|--------|--------|
+| OJ 故障配置，单步 IterationTotal | 94.18 s | 93.26 s | 92.66 s | 93.26 s |
+| O48，t=2 Total Evolve | 28.646 s | 29.315 s | 28.158 s | 28.646 s |
+
+O48 集群短测均显示 `OMP_PROC_BIND=false OMP_PLACES=threads`，每个 rank 的
+亲和集合由 `aff2` 恢复为 `aff60`。代表性第 1 步从约 94.18 s 降至
+13.69 s，约 **6.88x**；MPI wait_avg 从约 20.0 s 降至 2.24 s。
+
+正确性结果：三次均为 `Trajectory: PASS`、`Constraints: PASS`、`FINAL: PASS`。
+
+决定与下一步：保留。该问题是 OJ 外层 OpenMP 亲和性覆盖与 unbound MPI
+策略冲突，不是内存不足、cgroup 限流或 MPI 数值错误。下一步提交正式 t=40
+OJ；启动日志应出现 `-x OMP_PROC_BIND=false -x OMP_PLACES=threads`，诊断日志
+应显示 `aff60`。
+
+### R49：正式运行默认关闭逐步诊断
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+profiler 证据：逐步 phase timing 会增加多组 `MPI_Reduce`，MPI wait 统计还会
+为每步约 1100 次 Waitall 调用读取 `MPI_Wtime`。根因定位后尝试默认关闭
+`AMSS_PHASE_TIMING` 和 `AMSS_MPI_DIAGNOSTICS`。
+
+A/B 测试（t=2、30 MPI x 2 OMP、owner-local 16 线程、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|-------|-------|-------|--------|
+| diagnostics=1 | 28.646 s | 29.315 s | 28.158 s | 28.646 s |
+| diagnostics=0 | 32.364 s | 28.787 s | 28.047 s | 28.787 s |
+
+关闭诊断中位数慢约 0.5%，没有可确认收益；三次正确性均 PASS。
+
+决定与下一步：按一次一项原则回退默认值变化，继续默认开启诊断，保留环境变量
+供后续正式计时显式控制。
+
+## 下一步
+
+1. 将 O48 提交正式 OJ t=40，确认启动命令含 OpenMPI `-x OMP_*`，rank placement
+   为 `aff60`，并确认在 1740 s 限时内完成。
+2. 正式评分稳定后，可用 `AMSS_PHASE_TIMING=0 AMSS_MPI_DIAGNOSTICS=0` 做长跑
+   A/B；短跑未显示收益，不作为当前默认配置。

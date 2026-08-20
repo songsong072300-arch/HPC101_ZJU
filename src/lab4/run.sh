@@ -13,6 +13,12 @@
 #   AMSS_SURFACE_OMP_THREADS  threads for owner-local surface interp (default: 16, O8)
 #   AMSS_PHASE_TIMING        per-step wall/CPU/cgroup timing diagnostics (default: 1)
 #   AMSS_MPI_DIAGNOSTICS     per-step MPI Waitall diagnostics (default: 1)
+#   AMSS_MPI_YIELD_WHEN_IDLE MPI polling policy (default: 1)
+#   AMSS_MPI_BIND_TO         Open MPI binding policy (default: none)
+#   AMSS_MPI_MAP_BY          Open MPI mapping policy (default: slot)
+#   AMSS_MPI_OVERSUBSCRIBE   add --oversubscribe when set to 1 (default: 1)
+#   AMSS_OMP_PROC_BIND       OpenMP binding policy (default: false)
+#   AMSS_OMP_PLACES          OpenMP places for ABE ranks (default: threads)
 set -euo pipefail
 
 # Ansorg-TwoPuncture allocates large Fortran automatic arrays.
@@ -25,15 +31,12 @@ ulimit -s unlimited
 export OMPI_ALLOW_RUN_AS_ROOT="${OMPI_ALLOW_RUN_AS_ROOT:-1}"
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="${OMPI_ALLOW_RUN_AS_ROOT_CONFIRM:-1}"
 
-# The OJ uses its own Python launch helper (scripts/makefile_and_run.py from
-# the course repo), which invokes plain `mpiexec -n N env OMP_NUM_THREADS=2 ./ABE`
-# and does NOT honor AMSS_MPIEXEC. The OJ also injects:
+# The OJ uses its own Python launch helper and injects:
 #   AMSS_MPIEXEC="mpiexec --bind-to core --map-by slot:pe=2"
 #   OMP_PROC_BIND=close, OMP_PLACES=cores, OMP_NUM_THREADS=60
 #
-# We cannot override the mpiexec command line that makefile_and_run.py builds,
-# but we CAN control OpenMPI / PRRTE behavior through MCA environment variables
-# that are read at runtime regardless of the mpiexec flags.
+# Keep both the launcher command and the MCA environment explicit so the same
+# policy reaches OpenMPI regardless of the outer OJ environment.
 #
 # Problem: OJ containers may have a tiny /dev/shm (e.g. 64 MB), which causes
 # OpenMPI's shared-memory BTL to fail and fall back to TCP for
@@ -67,14 +70,22 @@ export AMSS_ABE_OMP_THREADS="2"
 export AMSS_TWOP_OMP_THREADS="30"
 export AMSS_SURFACE_COLLECTIVE="owner_local"
 export AMSS_SURFACE_OMP_THREADS="16"
-# Keep these enabled for the OJ diagnostic submission. Set either variable to
-# 0 explicitly after the timing problem has been identified.
+# Keep detailed diagnostics enabled for OJ verification; callers can disable them
+# explicitly after rank placement has been confirmed.
 export AMSS_PHASE_TIMING="${AMSS_PHASE_TIMING:-1}"
 export AMSS_MPI_DIAGNOSTICS="${AMSS_MPI_DIAGNOSTICS:-1}"
+export AMSS_MPI_YIELD_WHEN_IDLE="${AMSS_MPI_YIELD_WHEN_IDLE:-1}"
+export AMSS_MPI_BIND_TO="${AMSS_MPI_BIND_TO:-none}"
+export AMSS_MPI_MAP_BY="${AMSS_MPI_MAP_BY:-slot}"
+export AMSS_MPI_OVERSUBSCRIBE="${AMSS_MPI_OVERSUBSCRIBE:-1}"
 # 强制覆盖 OJ 注入的 OpenMP 绑定设置（unbound 调度需要）
-export OMP_PROC_BIND="false"
+export OMP_PROC_BIND="${AMSS_OMP_PROC_BIND:-false}"
 export OMP_DYNAMIC="FALSE"
-unset OMP_PLACES 2>/dev/null || true
+if [[ -n "${AMSS_OMP_PLACES:-}" ]]; then
+  export OMP_PLACES="$AMSS_OMP_PLACES"
+else
+  unset OMP_PLACES 2>/dev/null || true
+fi
 # 强制覆盖 OJ 注入的 OMP_NUM_THREADS（OJ 会注入 60）
 # TwoPunctureABE 需要 30 线程（物理核数），ABE 需要 2 线程（每 rank）
 # makefile_and_run.py 会根据阶段覆盖此值，但先设为 30 防止 OJ 的 60 生效
@@ -82,7 +93,12 @@ export OMP_NUM_THREADS="${AMSS_TWOP_OMP_THREADS:-30}"
 # 强制覆盖 OJ 注入的 AMSS_MPIEXEC（OJ 的 --bind-to core 会导致 30x2=60 PE
 # 硬映射失败 "Out of resource"）。unbound + oversubscribe 让 30 个 rank 在
 # 任何核数下都能启动，且 unbound 是 O8 实测最快的调度方式。
-export AMSS_MPIEXEC="mpiexec --allow-run-as-root --oversubscribe --use-hwthread-cpus --map-by slot --bind-to none --mca mpi_yield_when_idle 1"
+rank_omp_places="${OMP_PLACES:-threads}"
+mpi_exec_parts=(mpiexec --allow-run-as-root --use-hwthread-cpus --map-by "$AMSS_MPI_MAP_BY" --bind-to "$AMSS_MPI_BIND_TO" --mca mpi_yield_when_idle "$AMSS_MPI_YIELD_WHEN_IDLE" -x "OMP_PROC_BIND=$OMP_PROC_BIND" -x "OMP_PLACES=$rank_omp_places" -x "OMP_DYNAMIC=$OMP_DYNAMIC")
+if [[ "$AMSS_MPI_OVERSUBSCRIBE" == "1" ]]; then
+  mpi_exec_parts+=(--oversubscribe)
+fi
+AMSS_MPIEXEC="${mpi_exec_parts[*]}"
 # ============================================================
 
 ROOT_DIR="$(pwd)"
@@ -114,6 +130,8 @@ echo "==> Output   : $AMSS_OUTPUT_ROOT"
 echo "==> Cache    : $AMSS_CACHE_DIR"
 echo "==> MPI exec : $AMSS_MPIEXEC"
 echo "==> Diagnostics: phase=$AMSS_PHASE_TIMING mpi=$AMSS_MPI_DIAGNOSTICS"
+echo "==> MPI policy: yield=$AMSS_MPI_YIELD_WHEN_IDLE map=$AMSS_MPI_MAP_BY bind=$AMSS_MPI_BIND_TO oversubscribe=$AMSS_MPI_OVERSUBSCRIBE"
+echo "==> Rank OpenMP: proc_bind=$OMP_PROC_BIND places=$rank_omp_places dynamic=$OMP_DYNAMIC"
 
 # Diagnostic: print OpenMPI version and available BTLs
 echo "==> OpenMPI version: $(mpiexec --version 2>&1 | head -1)"
@@ -139,6 +157,12 @@ exec env \
   AMSS_SURFACE_OMP_THREADS="$AMSS_SURFACE_OMP_THREADS" \
   AMSS_PHASE_TIMING="$AMSS_PHASE_TIMING" \
   AMSS_MPI_DIAGNOSTICS="$AMSS_MPI_DIAGNOSTICS" \
+  AMSS_MPI_YIELD_WHEN_IDLE="$AMSS_MPI_YIELD_WHEN_IDLE" \
+  AMSS_MPI_BIND_TO="$AMSS_MPI_BIND_TO" \
+  AMSS_MPI_MAP_BY="$AMSS_MPI_MAP_BY" \
+  AMSS_MPI_OVERSUBSCRIBE="$AMSS_MPI_OVERSUBSCRIBE" \
+  AMSS_OMP_PROC_BIND="$OMP_PROC_BIND" \
+  AMSS_OMP_PLACES="${OMP_PLACES:-}" \
   OMPI_ALLOW_RUN_AS_ROOT="$OMPI_ALLOW_RUN_AS_ROOT" \
   OMPI_ALLOW_RUN_AS_ROOT_CONFIRM="$OMPI_ALLOW_RUN_AS_ROOT_CONFIRM" \
   PRTE_MCA_hwloc_default_binding_policy="$PRTE_MCA_hwloc_default_binding_policy" \
