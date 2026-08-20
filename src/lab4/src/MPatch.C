@@ -529,12 +529,23 @@ void Patch::Interp_Points_Impl(MyList<var> *VarList,
                 notfind = false;
                 if (myrank == BP->rank)
                 {
+                    int interp_inds[dim];
+                    double interp_coef[dim * 2 * ghost_width];
+                    if (local_weight != nullptr)
+                        f_global_interp_coeff(BP->shape, BP->X[0], BP->X[1], BP->X[2],
+                                              pox[0], pox[1], pox[2], ordn, Symmetry,
+                                              interp_inds, interp_coef);
                     MyList<var> *local_varl = VarList;
                     int k = 0;
                     while (local_varl)
                     {
-                        f_global_interp(BP->shape, BP->X[0], BP->X[1], BP->X[2], BP->fgfs[local_varl->data->sgfn], shellf[j * num_var + k],
-                                        pox[0], pox[1], pox[2], ordn, local_varl->data->SoA, Symmetry);
+                        if (local_weight != nullptr)
+                            f_global_interp_apply(BP->shape, BP->fgfs[local_varl->data->sgfn],
+                                                  shellf[j * num_var + k], ordn,
+                                                  local_varl->data->SoA, interp_inds, interp_coef);
+                        else
+                            f_global_interp(BP->shape, BP->X[0], BP->X[1], BP->X[2], BP->fgfs[local_varl->data->sgfn], shellf[j * num_var + k],
+                                            pox[0], pox[1], pox[2], ordn, local_varl->data->SoA, Symmetry);
                         local_varl = local_varl->next;
                         k++;
                     }

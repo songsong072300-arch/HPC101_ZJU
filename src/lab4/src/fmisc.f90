@@ -338,6 +338,123 @@
   return
 
   end subroutine global_interp
+!--------------------------------------------------------------------------
+! Precompute the tensor-product interpolation stencil for one fixed point.
+! The resulting indices are 1-based and may be non-positive at a symmetry
+! boundary, matching global_interp's decide3d convention.
+  subroutine global_interp_coeff(ex,X,Y,Z,x1,y1,z1,ORDN,symmetry,inds,coef)
+  implicit none
+
+  integer, intent(in) :: ex(3), ORDN, symmetry
+  real*8, intent(in) :: X(ex(1)), Y(ex(2)), Z(ex(3)), x1, y1, z1
+  integer, intent(out) :: inds(3)
+  real*8, intent(out) :: coef(3*ORDN)
+
+  integer :: axis, i, j
+  integer :: cxI(3), cxB(3), cxT(3), cmin(3), cmax(3)
+  real*8 :: dxyz(3), point(3), cx(3)
+
+  dxyz(1) = X(2)-X(1)
+  dxyz(2) = Y(2)-Y(1)
+  dxyz(3) = Z(2)-Z(1)
+  point = (/x1,y1,z1/)
+
+  cxI(1) = idint((x1-X(1))/dxyz(1)+0.4d0)+1
+  cxI(2) = idint((y1-Y(1))/dxyz(2)+0.4d0)+1
+  cxI(3) = idint((z1-Z(1))/dxyz(3)+0.4d0)+1
+  cxB = cxI - ORDN/2 + 1
+  cxT = cxB + ORDN - 1
+
+  cmin = 1
+  cmax = ex
+  if(symmetry == 2 .and. dabs(X(1)) < dxyz(1)) cmin(1) = -ORDN/2+1
+  if(symmetry == 2 .and. dabs(Y(1)) < dxyz(2)) cmin(2) = -ORDN/2+1
+  if(symmetry /= 0 .and. dabs(Z(1)) < dxyz(3)) cmin(3) = -ORDN/2+1
+
+  do axis=1,3
+    if(cxB(axis) < cmin(axis)) then
+      cxB(axis) = cmin(axis)
+      cxT(axis) = cxB(axis) + ORDN - 1
+    endif
+    if(cxT(axis) > cmax(axis)) then
+      cxT(axis) = cmax(axis)
+      cxB(axis) = cxT(axis) + 1 - ORDN
+    endif
+
+    if(cxB(axis) > 0) then
+      if(axis == 1) cx(axis) = (point(axis)-X(cxB(axis)))/dxyz(axis)
+      if(axis == 2) cx(axis) = (point(axis)-Y(cxB(axis)))/dxyz(axis)
+      if(axis == 3) cx(axis) = (point(axis)-Z(cxB(axis)))/dxyz(axis)
+    else
+      if(axis == 1) cx(axis) = (point(axis)+X(1-cxB(axis)))/dxyz(axis)
+      if(axis == 2) cx(axis) = (point(axis)+Y(1-cxB(axis)))/dxyz(axis)
+      if(axis == 3) cx(axis) = (point(axis)+Z(1-cxB(axis)))/dxyz(axis)
+    endif
+
+    do i=1,ORDN
+      coef((axis-1)*ORDN+i) = 1.d0
+      do j=1,ORDN
+        if(j /= i) coef((axis-1)*ORDN+i) = coef((axis-1)*ORDN+i) * &
+          (cx(axis)-dble(j-1))/dble(i-j)
+      enddo
+    enddo
+  enddo
+  inds = cxB
+  end subroutine global_interp_coeff
+
+!--------------------------------------------------------------------------
+! Apply a precomputed tensor-product stencil to one grid function.
+  subroutine global_interp_apply(ex,f,f_int,ORDN,SoA,inds,coef)
+  implicit none
+
+  integer, intent(in) :: ex(3), ORDN, inds(3)
+  real*8, intent(in) :: f(ex(1),ex(2),ex(3)), SoA(3), coef(3*ORDN)
+  real*8, intent(out) :: f_int
+
+  integer :: i, j, k, raw, ix(ORDN), iy(ORDN), iz(ORDN)
+  real*8 :: sx(ORDN), sy(ORDN), sz(ORDN)
+  real*8 :: tmp2(ORDN,ORDN), tmp1(ORDN)
+
+  do i=1,ORDN
+    raw = inds(1)+i-1
+    if(raw > 0) then
+      ix(i)=raw; sx(i)=1.d0
+    else
+      ix(i)=1-raw; sx(i)=SoA(1)
+    endif
+    raw = inds(2)+i-1
+    if(raw > 0) then
+      iy(i)=raw; sy(i)=1.d0
+    else
+      iy(i)=1-raw; sy(i)=SoA(2)
+    endif
+    raw = inds(3)+i-1
+    if(raw > 0) then
+      iz(i)=raw; sz(i)=1.d0
+    else
+      iz(i)=1-raw; sz(i)=SoA(3)
+    endif
+  enddo
+
+  tmp2=0.d0
+  do k=1,ORDN
+    do j=1,ORDN
+      do i=1,ORDN
+        tmp2(i,j)=tmp2(i,j)+coef(2*ORDN+k)*f(ix(i),iy(j),iz(k))*sx(i)*sy(j)*sz(k)
+      enddo
+    enddo
+  enddo
+  tmp1=0.d0
+  do j=1,ORDN
+    do i=1,ORDN
+      tmp1(i)=tmp1(i)+coef(ORDN+j)*tmp2(i,j)
+    enddo
+  enddo
+  f_int=0.d0
+  do i=1,ORDN
+    f_int=f_int+coef(i)*tmp1(i)
+  enddo
+  end subroutine global_interp_apply
 !----------------------------------------------------------------
 ! decide which 3d data to be used does not surport PI-Symmetry yet 
 !----------------------------------------------------------------

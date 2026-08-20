@@ -3720,9 +3720,63 @@ Py=0.0074058059, Pz=0.0090000732`，`FINAL: PASS`。裸质量和目标ADM质量�
 预期正式端到端收益约0.7秒，可能小于长跑波动；下一次正式OJ运行同时验证
 `t=40` 正确性和实际 `This Program Cost`。
 
+### O55：owner-local 表面积分复用张量插值系数
+
+状态：**保留；正式 t=40 已验证**。
+
+日期：2026-08-20。
+
+profiler 证据：对每步 `AnalysisStuff` 继续分段计时后，`Compute_Psi4` 仅约
+0.001 s，`surf_Wave` 约 0.99--1.09 s，`surf_MassPAng` 约 1.11 s；两次
+owner-local 表面积分构成约 2.1--2.2 s 的整个分析阶段。`surf_MassPAng` 对同一
+表面点依次插值 17 个网格函数，旧路径每个变量都会重复计算相同的三维插值
+区间和 Neville 系数。
+
+修改文件和关键位置：
+- `src/fmisc.f90`：新增 `global_interp_coeff`，为固定表面点一次性计算三轴
+  stencil 起点和 Lagrange 系数；新增 `global_interp_apply`，对不同网格函数
+  复用该 stencil。对称边界的索引映射和每个变量的 `SoA` 符号保持原语义。
+- `src/fmisc.h`：补充新 Fortran 过程的三种符号命名映射和 C++ 声明。
+- `src/MPatch.C`：仅在 owner-local 路径中每个表面点预计算一次系数，并由该点
+  的全部变量复用；collective 和普通插值路径保持不变。该优化不缓存 block
+  查找，因此不重复 R4 的退化方向。
+
+A/B 测试（计算节点、`t=2`、30 MPI x 2 OMP、owner-local 16 线程，同一作业内
+baseline/candidate 交替运行）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| baseline Total Evolve | 26.5423 s | 26.2875 s | 26.1715 s | 26.2875 s |
+| O55 Total Evolve | 25.5547 s | 25.0089 s | 25.8839 s | 25.5547 s |
+| baseline AnalysisStuff 平均值 | 2.4129 s | 2.4199 s | 2.4416 s | 2.4199 s |
+| O55 AnalysisStuff 平均值 | 1.3900 s | 1.3257 s | 1.4599 s | 1.3900 s |
+
+端到端中位数减少 0.7328 s，即 **2.79%**（1.029x）；目标分析阶段减少
+1.0298 s，即 **42.6%**。本地30-rank过量订阅的一步诊断中，AnalysisStuff
+也从103.1 s降到26.3 s，说明收益来自减少重复插值计算，而非单次调度偶然值。
+
+正确性结果：三轮短跑 checker 均 PASS，trajectory RMS=0；Grid Level 0 为
+`Ham=0.22284017, Px=0.020397406, Py=0.0074058059, Pz=0.0090000732`。本地
+baseline/candidate 的 `bssn_BH.dat`、`bssn_constraint.dat`、`bssn_ADMQs.dat`
+和 `bssn_psi4.dat` 除创建时间戳外文本位级一致。
+
+正式 `t=40` 验证：`Total Evolve Time=450.968 s`，40步 AnalysisStuff 的平均
+wall_max 为1.1926 s，后段稳定约1.24--1.26 s；单步 Body wall 多数约
+10.7--11.6 s，无 cgroup throttling、MPI imbalance 或异常内存增长。按 `t<40`
+截取正式 golden 后，trajectory 40/40 matched、RMS=0；Grid Level 0 约束量为
+`Ham=0.27739667, Px=0.028132512, Py=0.031488238, Pz=0.026503396`，`FINAL: PASS`。
+完整 golden 含 `t=0--99`，直接检查40步结果会因覆盖40/100而失败，属于参考时间
+范围不匹配，不是数值误差。
+
+决定与下一步：保留。该改动直接降低每个演化步固定发生的分析开销，并已通过
+短跑三轮 A/B 和长跑正确性验证。
+
 ## 下一步
 
-1. 在下一次正式 OJ `t=40` 中验证 O54，记录 TwoPuncture 阶段和端到端时间。
-2. 若继续优化 TwoPuncture，优先研究 LineRelax 稀疏矩阵中三对角元素位置的预计算；
-   该方向可消除 NRELAX=200 内重复的列号比较，但必须保持每行减法顺序。
-3. 逐步诊断关闭的短跑 A/B 没有收益，不更改正式默认值。
+1. O55 后 AnalysisStuff 仍约占每步1.19 s；分别采样 `surf_Wave` 和
+   `surf_MassPAng` 的 owner-local apply kernel，判断能否一次遍历 stencil 同时
+   累加多个变量，减少17次独立读取索引/系数数组，但必须维持变量内浮点顺序。
+2. RecursiveStep 仍约11.2 s，是单步最大头；继续以 profiler 数据选择
+   `fdderivs/fderivs` 的向量化方向，避免已回退的循环拆分和 O15 串行段并行化。
+3. 若继续优化 TwoPuncture，优先研究 LineRelax 稀疏矩阵中三对角元素位置预计算；
+   该方向只影响初值阶段，不会降低每个演化步耗时。

@@ -12,6 +12,8 @@
 #define f_global_interpind global_interpind
 #define f_global_interpind2d global_interpind2d
 #define f_global_interpind1d global_interpind1d
+#define f_global_interp_coeff global_interp_coeff
+#define f_global_interp_apply global_interp_apply
 #define f_l2normhelper l2normhelper
 #define f_l2normhelper_sh l2normhelper_sh
 #define f_l2normhelper_sh_rms l2normhelper_sh_rms
@@ -41,6 +43,8 @@
 #define f_global_interpind GLOBAL_INTERPIND
 #define f_global_interpind2d GLOBAL_INTERPIND2D
 #define f_global_interpind1d GLOBAL_INTERPIND1D
+#define f_global_interp_coeff GLOBAL_INTERP_COEFF
+#define f_global_interp_apply GLOBAL_INTERP_APPLY
 #define f_l2normhelper L2NORMHELPER
 #define f_l2normhelper_sh L2NORMHELPER_SH
 #define f_l2normhelper_sh_rms L2NORMHELPER_SH_RMS
@@ -70,6 +74,8 @@
 #define f_global_interpind global_interpind_
 #define f_global_interpind2d global_interpind2d_
 #define f_global_interpind1d global_interpind1d_
+#define f_global_interp_coeff global_interp_coeff_
+#define f_global_interp_apply global_interp_apply_
 #define f_l2normhelper l2normhelper_
 #define f_l2normhelper_sh l2normhelper_sh_
 #define f_l2normhelper_sh_rms l2normhelper_sh_rms_
@@ -111,6 +117,15 @@ extern "C"
 						 double *, double &,
 						 double &, double &, double &,
 						 int &, double *, int &);
+}
+
+extern "C"
+{
+	void f_global_interp_coeff(int *, double *, double *, double *,
+								 double &, double &, double &,
+								 int &, int &, int *, double *);
+	void f_global_interp_apply(int *, double *, double &,
+							 int &, double *, int *, double *);
 }
 
 extern "C"
