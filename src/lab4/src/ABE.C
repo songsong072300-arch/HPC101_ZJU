@@ -26,6 +26,50 @@ using namespace std;
 #endif
 
 namespace {
+void restart_with_requested_openmp_environment(char *const argv[])
+{
+      const char *requested_bind = getenv("AMSS_OMP_PROC_BIND");
+      const char *requested_places = getenv("AMSS_OMP_PLACES");
+      if (requested_bind == nullptr && requested_places == nullptr)
+            return;
+
+      const char *desired_bind =
+            requested_bind != nullptr && requested_bind[0] != '\0' ? requested_bind : "false";
+      const char *desired_places =
+            requested_places != nullptr && requested_places[0] != '\0' ? requested_places : "threads";
+      const char *actual_bind = getenv("OMP_PROC_BIND");
+      const char *actual_places = getenv("OMP_PLACES");
+      const char *actual_dynamic = getenv("OMP_DYNAMIC");
+      if (actual_bind != nullptr && strcmp(actual_bind, desired_bind) == 0 &&
+          actual_places != nullptr && strcmp(actual_places, desired_places) == 0 &&
+          actual_dynamic != nullptr && strcmp(actual_dynamic, "FALSE") == 0)
+            return;
+
+      if (setenv("OMP_PROC_BIND", desired_bind, 1) != 0 ||
+          setenv("OMP_PLACES", desired_places, 1) != 0 ||
+          setenv("OMP_DYNAMIC", "FALSE", 1) != 0)
+      {
+            perror("failed to set requested OpenMP environment");
+            exit(EXIT_FAILURE);
+      }
+
+      // libgomp may bind the initial thread before main, and exec preserves
+      // that mask. Expand it first; the cgroup still limits the allowed CPUs.
+      cpu_set_t allowed_cpus;
+      CPU_ZERO(&allowed_cpus);
+      for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+            CPU_SET(cpu, &allowed_cpus);
+      if (sched_setaffinity(0, sizeof(allowed_cpus), &allowed_cpus) != 0)
+      {
+            perror("failed to restore process CPU affinity");
+            exit(EXIT_FAILURE);
+      }
+
+      execv("/proc/self/exe", argv);
+      perror("failed to restart ABE with requested OpenMP environment");
+      exit(EXIT_FAILURE);
+}
+
 const char *env_or_unset(const char *name)
 {
       const char *value = getenv(name);
@@ -53,6 +97,8 @@ namespace parameters
 
 int main(int argc, char *argv[])
 {
+      restart_with_requested_openmp_environment(argv);
+
       int myrank = 0, nprocs = 1;
       // The OJ may launch ABE through its original HPC_init runner instead
       // of run.sh. In that path the runner does not install our MCA settings,

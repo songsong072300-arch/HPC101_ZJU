@@ -3578,3 +3578,46 @@ A/B 测试（t=2、30 MPI x 2 OMP、owner-local 16 线程、3 次）：
    为 `aff60`，并确认在 1740 s 限时内完成。
 2. 正式评分稳定后，可用 `AMSS_PHASE_TIMING=0 AMSS_MPI_DIAGNOSTICS=0` 做长跑
    A/B；短跑未显示收益，不作为当前默认配置。
+
+### O50：ABE 启动时恢复 affinity 并按请求的 OpenMP 环境重执行
+
+状态：**保留**。
+
+日期：2026-08-20。
+
+profiler 证据：O48 提交后的正式 OJ 命令虽然包含
+`-x OMP_PROC_BIND=false -x OMP_PLACES=threads`，但 ABE 内部仍报告
+`OMP_PROC_BIND=close OMP_PLACES=cores`，30 个 rank 全部为 `aff2`。这是因为
+OJ 的 Python 启动器在 `mpiexec` 参数之后通过更内层的 `env` 再次覆盖 OpenMP
+变量。代表性第 1 步仍需 86.92 s，CPU cgroup 增量 325.58 CPU-s，任务仍会超时。
+
+修改文件和关键位置：
+- `src/ABE.C`：在 `MPI_Init` 前比较 `AMSS_OMP_PROC_BIND` /
+  `AMSS_OMP_PLACES` 与实际 `OMP_*` 环境。
+- 若被覆盖，先用 `sched_setaffinity` 将主线程恢复到 cgroup 允许的完整 CPU
+  集合，再设置请求的 OpenMP 环境并通过 `/proc/self/exe` 重执行。必须先恢复
+  affinity，因为 libgomp 在 `main` 前施加的窄掩码会跨 `exec` 保留。
+- 直接运行 ABE 且未设置 `AMSS_OMP_*` 时不触发重执行；环境已经匹配时也不触发。
+
+A/B 测试（精确模拟 OJ 在 MPI 启动末端注入 `close/cores`，t=2、
+30 MPI x 2 OMP、owner-local 16 线程、3 次）：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|-------|-------|-------|--------|
+| O50 Total Evolve | 24.5272 s | 24.5700 s | 24.5811 s | 24.5700 s |
+| O50 Program Cost | 28.3099 s | 28.3497 s | 28.5122 s | 28.3497 s |
+
+三次均在 ABE 内报告 `OMP_PROC_BIND=false OMP_PLACES=threads` 和 `aff60`。
+代表性第 1 步为 12.22 s，较本次正式 OJ 的 86.92 s 快约 **7.11x**；
+MPI wait_avg 从 18.59 s 降至约 1.99 s。
+
+正确性结果：三次均为 `Trajectory: PASS`、`Constraints: PASS`、`FINAL: PASS`。
+
+决定与下一步：保留。O48 的 launcher `-x` 仍保留为正常启动路径，O50 作为
+OJ 内层环境覆盖的最终防线。下一步重新提交正式 t=40 OJ，确认 ABE 内部日志为
+`false/threads`、rank placement 为 `aff60` 并在限时内完成。
+
+## 下一步
+
+1. 提交 O50 到正式 OJ t=40，核对 ABE 内部 `false/threads` 和 `aff60`。
+2. 正式完成后根据 `This Program Cost` 再决定是否继续做长跑调度 A/B。
