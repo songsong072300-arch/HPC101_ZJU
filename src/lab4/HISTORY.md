@@ -3636,10 +3636,93 @@ TwoPuncture 环境为 `OMP_NUM_THREADS=60, close/cores`，但 `TwoPunctureABE.C`
 会调用 `omp_set_num_threads(AMSS_TWOP_OMP_THREADS)`。在改变其亲和性策略前，先在
 可执行文件内部测量实际 `omp_get_max_threads()`，再对 30/60 线程做独立 A/B。
 
+### R51：TwoPuncture 使用 SMT 60线程
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+验证了 `TwoPunctureABE.C` 内部的 `omp_set_num_threads()` 确实控制求解团队；在
+同一个60逻辑CPU作业中只改变 `AMSS_TWOP_OMP_THREADS`，保持
+`OMP_PROC_BIND=close, OMP_PLACES=cores`。
+
+| 线程数 | Run 1 | Run 2 | Run 3 | 中位数 |
+|--------|------:|------:|------:|-------:|
+| 30 | 80.008 s | 81.530 s | 79.329 s | 80.008 s |
+| 60 | 80.916 s | 80.017 s | 82.378 s | 80.916 s |
+
+60线程中位数慢1.13%。两种配置均得到相同裸质量，`puncture_parameters_new.txt`
+位级一致。决定：保持30线程，不使用SMT扩展团队。
+
+### R52：TwoPuncture `spread` 亲和性
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+拓扑诊断确认分配的60逻辑CPU构成30个物理核，例如 `128-129` 和 `186-187`
+分别为同核SMT sibling。固定30线程和 `OMP_PLACES=cores`，只改变绑定策略：
+
+| 绑定 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| close | 76.457 s | 79.632 s | 78.864 s | 78.864 s |
+| spread | 78.905 s | 79.685 s | 77.263 s | 78.905 s |
+
+差异仅0.05%，符合两种策略都覆盖30个 core place 的拓扑预期。决定：不增加
+TwoPuncture 重执行或亲和性覆盖逻辑。
+
+### R53：LineRelax 直接线性索引
+
+状态：**已回退**。
+
+日期：2026-08-20。
+
+假设：`LineRelax_be/al` 沿固定网格线移动，可用 stride 递增替代每点4次带边界
+判断的 `Index()`。保持稀疏项扫描、浮点顺序、Thomas求解和OpenMP划分不变。
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| baseline | 79.581 s | 79.600 s | 77.819 s | 79.581 s |
+| direct index | 81.280 s | 79.219 s | 78.896 s | 79.219 s |
+
+中位数表面快0.45%，但三组配对中有两组候选更慢，不能确认稳定收益，按规则回退。
+
+### O54：融合 Thomas LU 分解与前向代入
+
+状态：**保留；正式 t=40 待验证**。
+
+日期：2026-08-20。
+
+profiler 证据：当前30线程 TwoPuncture 的 gprof 采样中，`LineRelax_be` self
+占44.21%，`LineRelax_al` 占24.02%，`ThomasAlgorithm` 占16.99%，三者合计
+约85%。`F_of_v` 仅占4.37%，因此继续优化线松弛求解器。
+
+修改文件和关键位置：
+- `src/TwoPunctures.C`：将 Thomas 算法的 LU 分解与前向代入合并为一次递推，
+  直接使用输入上对角线 `c`，不再写入和读取 `l/u` 工作数组；反向代入的计算式
+  和顺序不变。
+- `src/TwoPunctures.C/.h`：移除不再使用的每线程 `ws_l/ws_u` 数组。
+
+计算节点、30线程、`close/cores`，同作业内 baseline/candidate 交替运行：
+
+| 版本 | Run 1 | Run 2 | Run 3 | 中位数 |
+|------|------:|------:|------:|-------:|
+| baseline | 67.113 s | 66.971 s | 66.523 s | 66.971 s |
+| O54 | 65.726 s | 66.238 s | 66.706 s | 66.238 s |
+
+中位数减少0.733秒，即1.09%（1.011x）；三组配对有两组更快。
+
+正确性：无 TwoPuncture cache 的完整 `t=2` 流水线通过，`Total Evolve=24.5895s`，
+trajectory RMS=0；Grid Level 0 为 `Ham=0.22284017, Px=0.020397406,
+Py=0.0074058059, Pz=0.0090000732`，`FINAL: PASS`。裸质量和目标ADM质量与基线一致。
+
+决定与下一步：保留。该优化只影响初值求解，不改变 ABE 的串行/MPI overlap。
+预期正式端到端收益约0.7秒，可能小于长跑波动；下一次正式OJ运行同时验证
+`t=40` 正确性和实际 `This Program Cost`。
+
 ## 下一步
 
-1. 确认 TwoPuncture 可执行文件内部的实际 OpenMP team 大小；不要仅依据 Python
-   启动日志判断其使用了60线程。
-2. 若实际 team 为30线程，单独测试 TwoPuncture 的 affinity 策略；每种配置至少
-   3次取中位数，并保持 ABE 配置不变。
+1. 在下一次正式 OJ `t=40` 中验证 O54，记录 TwoPuncture 阶段和端到端时间。
+2. 若继续优化 TwoPuncture，优先研究 LineRelax 稀疏矩阵中三对角元素位置的预计算；
+   该方向可消除 NRELAX=200 内重复的列号比较，但必须保持每行减法顺序。
 3. 逐步诊断关闭的短跑 A/B 没有收益，不更改正式默认值。

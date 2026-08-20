@@ -47,7 +47,7 @@ private:
    // One set per OpenMP thread (flat buffer: [nthreads * ws_nmax]).
    int ws_nmax, ws_nthreads;
    double *ws_diag, *ws_e, *ws_f, *ws_b, *ws_x;   // LineRelax_be / _al
-   double *ws_l, *ws_u, *ws_d, *ws_y;               // ThomasAlgorithm
+   double *ws_d, *ws_y;                              // ThomasAlgorithm
 
        // Pre-allocated derivs for JFD_times_dv / J_times_dv / F_of_v.
        derivs ws_dU, ws_U;

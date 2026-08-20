@@ -74,8 +74,6 @@ TwoPunctures::TwoPunctures(double mp, double mm, double b,
   ws_f    = new double[ws_nthreads * ws_nmax];
   ws_b    = new double[ws_nthreads * ws_nmax];
   ws_x    = new double[ws_nthreads * ws_nmax];
-  ws_l    = new double[ws_nthreads * ws_nmax];
-  ws_u    = new double[ws_nthreads * ws_nmax];
   ws_d    = new double[ws_nthreads * ws_nmax];
   ws_y    = new double[ws_nthreads * ws_nmax];
 
@@ -173,8 +171,6 @@ TwoPunctures::~TwoPunctures()
   delete[] ws_f;
   delete[] ws_b;
   delete[] ws_x;
-  delete[] ws_l;
-  delete[] ws_u;
   delete[] ws_d;
   delete[] ws_y;
 
@@ -2380,35 +2376,24 @@ void TwoPunctures::ThomasAlgorithm(int N, double *b, double *a, double *c, doubl
 #else
   int tid = 0;
 #endif
-  double *l = ws_l + tid * ws_nmax;
-  double *u = ws_u + tid * ws_nmax;
   double *d = ws_d + tid * ws_nmax;
   double *y = ws_y + tid * ws_nmax;
 
-  /* LU Decomposition */
+  /* LU decomposition and forward substitution */
   d[0] = a[0];
-  u[0] = c[0];
-
-  for (i = 0; i < N - 2; i++)
-  {
-    l[i] = b[i] / d[i];
-    d[i + 1] = a[i + 1] - l[i] * u[i];
-    u[i + 1] = c[i + 1];
-  }
-
-  l[N - 2] = b[N - 2] / d[N - 2];
-  d[N - 1] = a[N - 1] - l[N - 2] * u[N - 2];
-
-  /* Forward Substitution [L][y] = [q] */
   y[0] = q[0];
-  for (i = 1; i < N; i++)
-    y[i] = q[i] - l[i - 1] * y[i - 1];
+  for (i = 0; i < N - 1; i++)
+  {
+    const double l = b[i] / d[i];
+    d[i + 1] = a[i + 1] - l * c[i];
+    y[i + 1] = q[i + 1] - l * y[i];
+  }
 
   /* Backward Substitution [U][x] = [y] */
   x[N - 1] = y[N - 1] / d[N - 1];
 
   for (i = N - 2; i >= 0; i--)
-    x[i] = (y[i] - u[i] * x[i + 1]) / d[i];
+    x[i] = (y[i] - c[i] * x[i + 1]) / d[i];
 
   return;
 }
