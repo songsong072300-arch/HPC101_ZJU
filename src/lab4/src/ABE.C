@@ -116,6 +116,26 @@ int main(int argc, char *argv[])
       MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
       MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
 
+      // The OJ scorer parses these two lightweight lines to validate the
+      // submitted MPI/OpenMP configuration. Keep them independent of the
+      // expensive per-step diagnostics controlled by AMSS_*_DIAGNOSTICS.
+      if (myrank == 0)
+      {
+            char processor[MPI_MAX_PROCESSOR_NAME];
+            int processor_len = 0;
+            MPI_Get_processor_name(processor, &processor_len);
+            int max_threads = 1;
+#ifdef _OPENMP
+            max_threads = omp_get_max_threads();
+#endif
+            cout << " MPI diagnostics: ranks=" << nprocs
+                 << " host=" << string(processor, processor_len)
+                 << " omp_max_threads=" << max_threads << endl;
+            cout << " MPI diagnostics: OMP_NUM_THREADS=" << env_or_unset("OMP_NUM_THREADS")
+                 << " OMP_PROC_BIND=" << env_or_unset("OMP_PROC_BIND")
+                 << " OMP_PLACES=" << env_or_unset("OMP_PLACES") << endl;
+      }
+
       if (diagnostics_enabled())
       {
             char mpi_version[MPI_MAX_LIBRARY_VERSION_STRING];
