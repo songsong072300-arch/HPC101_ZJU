@@ -3581,7 +3581,7 @@ A/B 测试（t=2、30 MPI x 2 OMP、owner-local 16 线程、3 次）：
 
 ### O50：ABE 启动时恢复 affinity 并按请求的 OpenMP 环境重执行
 
-状态：**保留**。
+状态：**保留；正式 OJ t=40 已验证**。
 
 日期：2026-08-20。
 
@@ -3613,11 +3613,33 @@ MPI wait_avg 从 18.59 s 降至约 1.99 s。
 
 正确性结果：三次均为 `Trajectory: PASS`、`Constraints: PASS`、`FINAL: PASS`。
 
+正式 OJ `t=40` 验证：
+
+| 指标 | 结果 |
+|------|------:|
+| ABE rank OpenMP 环境 | `OMP_PROC_BIND=false`, `OMP_PLACES=threads` |
+| rank affinity | 30 ranks 全部 `aff60` |
+| Total Evolve Time | 490.284 s |
+| ABE Total Running Time | 492.123 s |
+| `This Program Cost` | 563.689319 s |
+| OJ measured wall time | 572.554052 s |
+
+正式运行的代表性单步 Body wall 为 11.69--12.95 s，MPI wait_avg 为
+1.44--2.30 s；CPU cgroup 没有 throttling。任务在 1740 s 限时内正常完成。
+正确性为 `trajectory RMS=0`，Grid Level 0 约束量
+`Ham=0.27739667, Px=0.028132512, Py=0.031488238, Pz=0.026503396`，最终
+`Correctness PASS`。
+
 决定与下一步：保留。O48 的 launcher `-x` 仍保留为正常启动路径，O50 作为
-OJ 内层环境覆盖的最终防线。下一步重新提交正式 t=40 OJ，确认 ABE 内部日志为
-`false/threads`、rank placement 为 `aff60` 并在限时内完成。
+OJ 内层环境覆盖的最终防线；正式评分路径已闭环验证。OJ 的 Python 日志仍显示
+TwoPuncture 环境为 `OMP_NUM_THREADS=60, close/cores`，但 `TwoPunctureABE.C`
+会调用 `omp_set_num_threads(AMSS_TWOP_OMP_THREADS)`。在改变其亲和性策略前，先在
+可执行文件内部测量实际 `omp_get_max_threads()`，再对 30/60 线程做独立 A/B。
 
 ## 下一步
 
-1. 提交 O50 到正式 OJ t=40，核对 ABE 内部 `false/threads` 和 `aff60`。
-2. 正式完成后根据 `This Program Cost` 再决定是否继续做长跑调度 A/B。
+1. 确认 TwoPuncture 可执行文件内部的实际 OpenMP team 大小；不要仅依据 Python
+   启动日志判断其使用了60线程。
+2. 若实际 team 为30线程，单独测试 TwoPuncture 的 affinity 策略；每种配置至少
+   3次取中位数，并保持 ABE 配置不变。
+3. 逐步诊断关闭的短跑 A/B 没有收益，不更改正式默认值。
