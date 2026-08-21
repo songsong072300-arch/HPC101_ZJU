@@ -4735,3 +4735,40 @@ O72, O78, O79
 - TwoPuncture 阶段: 69.5s -> 30.5s (-56.1%, -39.0s)
 - 正确性: FINAL PASS (trajectory RMS <= 0.001, constraints 一致)
 - 待验证: 正式 t=40 长跑正确性与性能
+
+### O81：BY_KKofxyz 缓存（precompute KK field）
+
+状态：**已回退（t=10 A/B 无收益）**。
+
+日期：2026-08-21。
+
+profiler 证据：BY_KKofxyz 计算 Bowen-York 曲率标量 A_ij A^ij，纯函数
+(x,y,z)，不含演化场 v。每次调用约 2 sqrt + 42 div + 250 FLOPs。预计被调用
+约 33M 次（21M 在串行 SetMatrix_JFD 路径）。
+
+修改文件和关键位置：
+- `src/TwoPunctures.h`：新增 `pc_KK`/`pc_KK_jfd` 成员数组（各 520KB），
+  `precompute_KK` 方法声明，修改 NonLinEquations/LinEquations 签名加 KK 参数。
+- `src/TwoPunctures.C`：新增 `precompute_KK`（在 Solve() 中调用一次），两个表
+  分别用 phi=2*Pi*k/n3（F_of_v/J_times_dv 路径）和 phi=hp*j（JFD_times_dv 路径）。
+  NonLinEquations/LinEquations 中 BY_KKofxyz(x,y,z) 替换为传入的 KK 值。
+  析构函数释放 pc_KK/pc_KK_jfd。
+
+devpod 4 线程正确性验证：puncture_parameters 位级一致，Ansorg.psid max rel
+diff 8.39e-12，BiCGStab 85 次（与 O78+O79 一致）。
+
+计算节点 t=10 A/B（baseline = O78+O79, candidate = O78+O79+O81）：
+
+| 指标 | baseline 中位数 | O81 中位数 | 变化 |
+|------|---:|---:|---|
+| Program Cost | 147.03 s | 145.94 s | -0.74% |
+| Total Evolve | 115.152 s | 114.784 s | -0.32% |
+| TwoPuncture+overhead | 31.93 s | 31.21 s | -0.73s |
+
+差异 0.74%，远低于 2% 阈值。BY_KKofxyz 不是主要瓶颈——LineRelax+Thomas
+（~60%即~18s）和 Derivatives_AB3（~5s）主导 TwoPuncture 时间。SetMatrix_JFD
+中的 JFD_times_dv 主要开销是导数计算和坐标变换，不是 BY_KKofxyz。
+
+决定：回退。BY_KKofxyz 缓存理论收益 ~4-5s 但实测仅 0.73s。当前保留优化不变：
+O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3),
+O39, O48, O50, O54, O55, O62, O63, O64(诊断), O69, O70, O72, O78, O79
