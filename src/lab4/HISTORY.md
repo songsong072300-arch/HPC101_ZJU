@@ -4723,3 +4723,15 @@ TwoPuncture 从 ~70s 降至 ~30.5s，节省 39s（56% 加速）。30 核并行�
 当前保留优化：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19,
 O20, O26(E1+E3), O39, O48, O50, O54, O55, O62, O63, O64(诊断), O69, O70,
 O72, O78, O79
+
+## 当前版本信息
+
+- Git commit: `9195742` (main / myfork/main)
+- 对应 GitHub: https://github.com/songsong072300-arch/HPC101_ZJU
+- 基线 commit: `4c957b7` (Restore scorer runtime metadata)
+- 新增优化: O78 (chebft inv=1 查找表复用), O79 (并行化 TwoPuncture 串行段)
+- 回退优化: O80 (P2-4/P3-1/P3-2, t=10 A/B 无收益)
+- t=10 端到端 A/B 中位数: 185.06s -> 146.17s (-21.0%, -38.89s)
+- TwoPuncture 阶段: 69.5s -> 30.5s (-56.1%, -39.0s)
+- 正确性: FINAL PASS (trajectory RMS <= 0.001, constraints 一致)
+- 待验证: 正式 t=40 长跑正确性与性能
