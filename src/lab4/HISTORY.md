@@ -4683,3 +4683,43 @@ profiler 证据：`bssn_class.C:1913` 每步都做 `MPI_Bcast(&abortFlag, 1, MPI
 
 决定与下一步：保留 P2-4/P3-1/P3-2。三项均不增加持久内存，不受 page cache
 污染影响。需要在计算节点验证端到端收益（预期 <5s，但无退化风险）。
+
+### O80 计算节点 A/B 验证：已回退
+
+日期：2026-08-21。
+
+计算节点 t=10 A/B（30 MPI × 2 OMP、owner-local 16 线程、无 cache、同一 allocation
+交替 3 轮）：
+
+| 指标 | baseline 中位数 | O80 中位数 | 变化 |
+|------|---:|---:|---|
+| Total Evolve | 115.602 s | 115.650 s | +0.04%（持平） |
+
+Total Evolve 差异 0.048s（0.04%），远低于 2% 阈值。O80 对 ABE 演化性能无可测量
+影响。按"一次一项、无收益回退"原则恢复 Parallel.C/bssn_class.C/monitor.C
+到 baseline。
+
+### O78+O79 计算节点 t=10 A/B 验证：保留
+
+日期：2026-08-21。
+
+计算节点 t=10 A/B（30 MPI × 2 OMP、owner-local 16 线程、无 cache、同一 allocation
+交替 3 轮，baseline = 4c957b7, candidate = O78+O79）：
+
+| 指标 | baseline 中位数 | candidate 中位数 | 变化 |
+|------|---:|---:|---|
+| Program Cost | 185.06 s | 146.17 s | **-38.89 s (-21.0%)** |
+| Total Evolve | 115.602 s | 115.650 s | +0.04%（持平） |
+| TwoPuncture+overhead | 69.5 s | 30.5 s | **-39.0 s (-56.1%)** |
+
+正确性：baseline 和 candidate 均 FINAL: PASS，trajectory RMS <= 0.001，
+constraints Ham=0.24433597, Px=0.028132512, Py=0.018052348, Pz=0.021754012
+完全一致。
+
+TwoPuncture 从 ~70s 降至 ~30.5s，节省 39s（56% 加速）。30 核并行化效果
+比 devpod 4 线程（2.85x）更显著。ABE Total Evolve 持平说明 O78+O79 不影响
+演化路径。
+
+当前保留优化：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19,
+O20, O26(E1+E3), O39, O48, O50, O54, O55, O62, O63, O64(诊断), O69, O70,
+O72, O78, O79

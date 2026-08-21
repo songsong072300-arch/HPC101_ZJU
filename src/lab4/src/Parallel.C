@@ -2641,17 +2641,8 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
     long long diagnostic_elements = 0;
 
     double **send_data, **rec_data;
-    static double **s_send_ptrs = nullptr;
-    static double **s_rec_ptrs = nullptr;
-    static int s_ptrs_size = 0;
-    if (s_ptrs_size < cpusize) {
-        delete[] s_send_ptrs; delete[] s_rec_ptrs;
-        s_send_ptrs = new double*[cpusize];
-        s_rec_ptrs = new double*[cpusize];
-        s_ptrs_size = cpusize;
-    }
-    send_data = s_send_ptrs;
-    rec_data = s_rec_ptrs;
+    send_data = new double *[cpusize];
+    rec_data = new double *[cpusize];
     int length;
 
     for (node = 0; node < cpusize; node++)
@@ -2718,7 +2709,8 @@ void Parallel::transfer(MyList<Parallel::gridseg> **src, MyList<Parallel::gridse
     }
 
     // O20: reqs/stats are static, don't delete here
-    // P2-4: send_data/rec_data pointer arrays are static, don't delete here
+    delete[] send_data;
+    delete[] rec_data;
 }
 //
 void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gridseg> **dst,
@@ -2746,17 +2738,8 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
     long long diagnostic_elements = 0;
 
     double **send_data, **rec_data;
-    static double **s_mix_send_ptrs = nullptr;
-    static double **s_mix_rec_ptrs = nullptr;
-    static int s_mix_ptrs_size = 0;
-    if (s_mix_ptrs_size < cpusize) {
-        delete[] s_mix_send_ptrs; delete[] s_mix_rec_ptrs;
-        s_mix_send_ptrs = new double*[cpusize];
-        s_mix_rec_ptrs = new double*[cpusize];
-        s_mix_ptrs_size = cpusize;
-    }
-    send_data = s_mix_send_ptrs;
-    rec_data = s_mix_rec_ptrs;
+    send_data = new double *[cpusize];
+    rec_data = new double *[cpusize];
     int length;
 
     for (node = 0; node < cpusize; node++)
@@ -2823,7 +2806,8 @@ void Parallel::transfermix(MyList<Parallel::gridseg> **src, MyList<Parallel::gri
     }
 
     // O20: reqs/stats are static, don't delete here
-    // P2-4: send_data/rec_data pointer arrays are static, don't delete here
+    delete[] send_data;
+    delete[] rec_data;
 }
 
 void Parallel::Sync(Patch *Pat, MyList<var> *VarList, int Symmetry, int sync_site)
