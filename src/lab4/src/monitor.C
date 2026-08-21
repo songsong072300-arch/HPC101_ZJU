@@ -141,9 +141,9 @@ void monitor::writefile(double time, int NN, double *DDAT)
       outfile << " " << setw(15) << DDAT[countlm];
     }
     outfile << endl;
-    flush(outfile);
   }
 }
+
 void monitor::writefile(double time, int NN, double *DDAT1, double *DDAT2)
 {
   if (I_Print)
@@ -156,7 +156,6 @@ void monitor::writefile(double time, int NN, double *DDAT1, double *DDAT2)
               << " " << setw(15) << DDAT2[countlm];
     }
     outfile << endl;
-    flush(outfile);
   }
 }
 void monitor::print_message(string head)
@@ -164,6 +163,5 @@ void monitor::print_message(string head)
   if (I_Print)
   {
     outfile << head << endl;
-    flush(outfile);
   }
 }

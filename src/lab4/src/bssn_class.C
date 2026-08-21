@@ -1896,21 +1896,26 @@ void bssn_class::Evolve(int Steps)
     
     ////////////////////////////////////////////////////////////
     // If an "abort" command is detected on stdin, terminate MPI processes
+    // P3-2: Only check every 10 steps to reduce global synchronization
     ////////////////////////////////////////////////////////////
     
     bool shouldAbort = false;
-    
 
-    // Only rank 0 checks stdin
-    if (myrank == 0) {
+    static int abort_check_counter = 0;
+    abort_check_counter++;
+    bool do_abort_check = (abort_check_counter % 10 == 0);
+
+    // Only rank 0 checks stdin (every 10 steps)
+    if (myrank == 0 && do_abort_check) {
       if (check_Stdin_Abort()) {
         shouldAbort = true;
       }
     }
 
-    // Broadcast abort flag to all ranks
+    // Broadcast abort flag to all ranks (every 10 steps)
     int abortFlag = shouldAbort ? 1 : 0;
-    MPI_Bcast(&abortFlag, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (do_abort_check)
+      MPI_Bcast(&abortFlag, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
     if (abortFlag && myrank == 0) {
         cout << endl;

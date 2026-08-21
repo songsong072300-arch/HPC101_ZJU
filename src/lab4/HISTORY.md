@@ -4339,3 +4339,347 @@ owner-local OpenMP归约的运行间末位差异。
    保持RHS写入范围互斥，并先只覆盖corrector，不同时改predictor或AMR路径。
 3. 不再提高alias ceiling；32已证实运行时检查开销过高。`fdderivs`和
    `lopsided_kodis` 的未向量化原因是边界控制流，不重试已失败的循环拆分。
+
+### R73：RK corrector ghost exchange 的 MPI progress 探针
+
+状态：**已回退（平台无异步 progress）**。
+
+日期：2026-08-20。
+
+profiler 证据：O64显示 `rk_corrector` 是最大的单类 ghost 通信路径，每步约有
+96,516个请求、9.9 GiB全rank流量和约0.59--0.61秒/rank的Waitall。完整
+interior/boundary重构前，先验证当前OpenMPI `sm,self` transport在两条OpenMP
+线程都忙于计算时是否能推进已经发布的请求。
+
+修改文件和关键位置：候选曾在 `src/Parallel.C` 的corrector `transfer` 中，在
+所有 `MPI_Isend/Irecv` 发布后执行2 ms双线程纯计算窗口，再调用一次
+`MPI_Testsome`统计已完成请求，最后仍按原顺序执行 `MPI_Waitall` 和统一解包；
+`src/bssn_class.C` 每步汇总完成比例、测试开销和残余等待。探针只由
+`AMSS_RK_PROGRESS_PROBE_US=2000` 开启，不修改消息、数值计算或解包顺序。
+
+计算节点短测（job 126232，`t=2`、30 MPI x 2 OMP、TwoPuncture cache）：
+
+| step | requests | compute avg/rank | pre-Wait completed | MPI_Testsome avg/rank | residual Waitall avg/rank |
+|------|---------:|-----------------:|-------------------:|----------------------:|--------------------------:|
+| 1 | 96,516 | 0.392317 s | 0 (0.0%) | 0.044033 s | 0.555174 s |
+| 2 | 96,516 | 0.392373 s | 0 (0.0%) | 0.042522 s | 0.539926 s |
+
+两步均没有任何请求在计算窗口内完成；进入 `MPI_Testsome` 本身还增加约43 ms/rank，
+之后残余Waitall仍接近O64原值。这证明当前无progress thread的OpenMPI共享内存路径
+不会在主演化线程长时间离开MPI时异步推进，不能靠简单的
+post/interior/wait/boundary顺序隐藏通信。
+
+正确性：`Total Evolve=24.7728 s`、`Program Cost=28.6620 s`；trajectory 2/2
+matched、RMS=0，constraints全部小于2，`FINAL: PASS`。归档：
+`test_archives/hybrid_20260820_154547/`。
+
+决定与下一步：完整回退探针源码，不实现高风险的RHS interior/boundary拆分，也不
+引入progress thread。后续只考虑不会依赖异步MPI进展的计算优化；首先根据逐循环
+向量化报告寻找O72之外的新证据，避免重试已有失败的kernel拆分方向。
+
+## 下一步
+
+1. 生成当前O72版本 `compute_rhs_bssn` 的逐循环向量化报告，定位仍未向量化且不需
+   大量alias versioning的高成本循环；一次只测试一个明确原因。
+2. 不进行RHS interior/boundary拆分；R73已确认当前OpenMPI transport在计算窗口内
+   完成率为0，周期性 `MPI_Test*` 还会增加progress开销。
+3. 正式候选继续要求同一allocation内至少三轮配对、`FINAL: PASS`，并保持Arm
+   `libomp`、unbound和 `mpi_yield_when_idle=1` 不变。
+
+### R74：将 bssn_rhs alias-versioning 上限提高到24
+
+状态：**已回退**。
+
+日期：2026-08-21。
+
+profiler/编译器证据：当前O72逐循环报告中 `bssn_rhs.f90` 有151个vectorized
+loops和12个alias ceiling失败。历史profile最大的RHS outlined region是
+`compute_rhs_bssn_._omp_fn.5`（Ricci workshare，起始于line 386，self 12.33%），
+但实测ceiling 31仍无法向量化该区域。ceiling 24只新增3个vectorized loops，
+对应 `_omp_fn.4`（起始于line 319，历史self 2.75%）；相比R71的32，避免同时启用
+另外3个更高检查成本的循环。
+
+修改文件和关键位置：候选仅将 `CMakeLists.txt` 中 `src/bssn_rhs.f90` 的GNU
+Fortran参数从 `vect-max-version-for-alias-checks=16` 提高到24。baseline与candidate
+使用隔离build目录、GNU 14.2和同一Arm `libomp`，其他源码及运行配置相同。
+
+计算节点A/B（30 MPI x 2 OMP、TwoPuncture cache、同一allocation交替顺序）：
+
+| 测试 | baseline | candidate | 中位数变化 |
+|------|----------|-----------|------------|
+| `t=2`, job 128646 | 24.2405 / 24.3299 / 23.7730 s | 24.1311 / 23.7456 / 23.9569 s | 快1.17%，2/3配对更快 |
+| `t=10`, job 128664 | 122.138 / 123.102 / 124.253 s | 123.445 / 123.803 / 123.661 s | 慢0.45%，仅1/3配对更快 |
+
+12轮均trajectory RMS=0、constraints PASS、`FINAL: PASS`。归档：
+`test_archives/ab_20260821_035135_alias24_t2/`、
+`test_archives/ab_20260821_035523_alias24_t10/`。
+
+决定与下一步：长跑信号显示新增alias检查的分派开销超过3个额外SIMD循环的收益，
+完整回退到已正式验证的ceiling 16。不再测试16以上的全文件ceiling；R71、R74已
+覆盖24和32两档，且最热Ricci region即使31仍未解锁。
+
+## 下一步
+
+1. 保留O72的alias ceiling 16；不再通过全文件alias阈值扩大vectorization。
+2. 若继续计算优化，只考虑能直接减少 `_omp_fn.5` Ricci workshare指令数、且不重复
+   R3/O25等既有融合失败的局部公共子表达式；必须先由汇编或硬件计数证明收益空间。
+3. MPI interior/boundary overlap和周期性progress polling已由R73否决，不再重试。
+
+### R75：合并同层多Patch的inner-ghost MPI消息
+
+状态：**已回退**。
+
+日期：2026-08-21。
+
+profiler/通信证据：O64中 `rk_corrector` 每逻辑Sync约产生2.48次Waitall，
+`rk_predictor`约2.48次；`Parallel::Sync(MyList<Patch>*)` 先逐Patch调用一次
+`Sync(Patch*)`，每次都独立pack/Isend/Irecv/Waitall，再执行一次inter-patch buffer
+transfer。在moving levels含两个Patch时，这形成三个串行transfer阶段。R73又已证明
+当前OpenMPI `vader,self` 在计算区间无异步progress，因此本实验改为减少消息和
+Waitall次数，而不尝试compute/communication overlap。
+
+修改文件和关键位置：候选曾修改 `src/Parallel.C` 的
+`Parallel::Sync(MyList<Patch>*)`。仍按原Patch顺序分别调用 `build_ghost_gsl`、
+`build_owned_gsl0`和 `build_gstl`，避免跨Patch错误匹配；只将已经解析好的
+per-peer src/dst segment pair按原顺序连接，统一调用一次 `transfer()`。inter-patch
+buffer transfer保持不变，消息内数值与pack/unpack次序不变。
+
+计算节点A/B（job 128777、128800，30 MPI x 2 OMP、TwoPuncture cache、同一
+allocation交替顺序）：
+
+| 测试 | baseline | candidate | 中位数变化 |
+|------|----------|-----------|------------|
+| `t=2` | 24.0340 / 24.0719 / 23.9425 s | 23.9928 / 24.4295 / 23.9490 s | 快0.17%，仅1/3配对更快 |
+| `t=10` | 124.167 / 125.070 / 124.116 s | 124.362 / 125.011 / 125.300 s | **慢0.68%**，仅1/3配对更快 |
+
+12轮均trajectory通过0.1%门槛（RMS=0）、constraints全部小于2、`FINAL: PASS`。
+归档：`test_archives/ab_20260821_041614_sync_merge_t2/`、
+`test_archives/ab_20260821_041945_sync_merge_t10/`。
+
+决定与下一步：完整回退。减少Waitall调用未转化为性能收益；更大的聚合缓冲和更长
+单阶段pack/通信，以及失去Patch间的分阶段推进，抵消了调用次数下降。不再合并
+同层Patch inner-ghost消息，也不继续扩大到inter-patch消息。5.3方向当前已覆盖
+receive-first、Waitsome、interior overlap progress探针和消息聚合，均无稳定收益。
+
+## 下一步
+
+1. 保留现有逐Patch `Parallel::Sync`；不再尝试同层消息聚合或无progress支持的
+   interior/boundary overlap。
+2. 5.1的30 MPI x 2 OMP、unbound + yield和owner-local 16线程已经过完整rank/binding
+   搜索，保持不变。
+3. 后续5.2实验只考虑由汇编或硬件计数支持的Ricci局部公共子表达式消除；避免重试
+   RHS数组融合、显式collapse、alias ceiling或差分kernel循环拆分。
+
+### R76：仅对 bssn_rhs 关闭 Fortran parenthesis protection
+
+状态：**已回退**。
+
+日期：2026-08-21。
+
+profiler/编译器证据：当前最大纯计算热点仍是Ricci workshare对应的
+`compute_rhs_bssn_._omp_fn.5`（历史self 12.33%）。Ricci表达式中存在
+`TWO*(a+b+c)+a+...` 等重复乘积，但Fortran默认的 `-fprotect-parens` 限制跨括号
+重结合。候选只允许GCC在 `bssn_rhs.f90` 内重结合表达式，不启用
+`-ffast-math`中的NaN、signed-zero、reciprocal等其他高风险选项。
+
+修改文件和关键位置：候选仅在 `CMakeLists.txt` 的 `src/bssn_rhs.f90` source-local
+GNU选项中，在O72的alias ceiling 16之后加入 `-fno-protect-parens`。未修改公式源码、
+循环/OpenMP结构、MPI或其他Fortran kernel。编译器确认选项生效；但最热
+`_omp_fn.5` text由33,344增至33,376 bytes，未显示预期的静态指令缩减。
+
+计算节点A/B（30 MPI x 2 OMP、TwoPuncture cache、同一allocation交替）：
+
+| 测试 | baseline | candidate | 结果 |
+|------|----------|-----------|------|
+| `t=2`, job 129076 | 24.3688 / 24.2223 / 24.1149 s | 24.2033 / 24.1342 / 24.3013 s | 中位数快0.08%，2/3配对更快 |
+| `t=10`, job 129122 | 125.269 / 125.050 / 124.773 s | 125.193 / 124.061 / 124.047 s | 中位数快0.79%，3/3配对更快 |
+| `t=40`, job 129216 | 471.709 s | 476.687 s | **慢1.06%** |
+
+短测12轮和正式2轮均trajectory通过0.1%门槛、constraints全部小于2、
+`FINAL: PASS`。归档：
+`test_archives/ab_20260821_050252_no_protect_parens_t2/`、
+`test_archives/ab_20260821_050757_no_protect_parens_t10/`、
+`test_archives/ab_20260821_052302_no_protect_parens_t40/`。
+
+决定与下一步：完整回退。该实验再次证明亚1%的短测信号必须经过正式长度验证；
+重结合没有缩小最热函数，并在40步工作负载稳定退化。不再使用
+`-fno-protect-parens`，也不尝试其更宽泛的 `-fassociative-math`/`-ffast-math`
+变体。保留O72 alias ceiling 16。
+
+## 下一步
+
+1. 不再尝试全文件浮点重结合；Ricci优化只有在能由GIMPLE/汇编证明减少指令且不
+   增加outlined函数体积时才值得进入A/B。
+2. 5.1资源配置和5.3通信结构保持现有最优；R75/R76都表明减少表面开销不必然改善
+   40步调度与内存行为。
+3. 下一轮优先重新采集当前O72+O69版本的硬件计数，区分Ricci是frontend、执行端口
+   还是内存受限，再选择一个局部而非全文件的变换。
+
+### R77：全程序 `-Ofast -ffast-math -mcpu=native`
+
+状态：**已回退**。
+
+日期：2026-08-21。
+
+实验动机：按用户指定组合测试
+`AMSS_OPT="-Ofast -ffast-math"` 与 `AMSS_ARCH_FLAGS="-mcpu=native"`。
+R2曾在早期一步基线上单独测试 `-mcpu=native` 并退化13.6%，但本次用当前
+O72/O69版本、正式计算节点和完整A/B工作流重新验证组合效果。
+
+修改和构建：没有直接改生产默认值；候选使用隔离的 `build_ofast_native/`，通过
+CMake cache精确设置上述两个变量。候选与baseline都保留 `-fstack-arrays`、
+`bssn_rhs.f90` alias ceiling 16及Arm `libomp`。候选ABE text由1,044,650降至
+953,494 bytes（约小8.7%），Ricci `_omp_fn.5` 由33,344降至33,252 bytes。
+
+计算节点A/B（30 MPI x 2 OMP、TwoPuncture cache、同一allocation交替）：
+
+| 测试 | baseline | candidate | 结果 |
+|------|----------|-----------|------|
+| `t=2`, job 130638 | 24.1714 / 24.0408 / 24.1389 s | 23.8444 / 24.2670 / 23.9344 s | 中位数快0.85%，2/3配对更快 |
+| `t=10`, job 131285 | 122.574 / 124.097 / 124.459 s | 123.369 / 123.145 / 123.642 s | 中位数快0.59%，2/3配对更快 |
+| `t=40`, job 131393 | 472.893 s | 476.827 s | **慢0.83%** |
+
+短测12轮和正式2轮均trajectory通过0.1%门槛、constraints全部小于2、
+`FINAL: PASS`。归档：`test_archives/ab_20260821_095203_ofast_native_t2/`、
+`test_archives/ab_20260821_115501_ofast_native_t10/`、
+`test_archives/ab_20260821_121006_ofast_native_t40/`。
+
+决定与下一步：完整回退，不修改 `CMakeLists.txt` 的生产默认值。尽管短测中位数
+略快且代码体积缩小，正式40步仍稳定退化0.83%；这与R2的方向一致，也再次说明
+native调度/SIMD和fast-math重结合不适合该多数组BSSN工作负载。不再测试该组合，
+继续保留 `-O3`、空 `AMSS_ARCH_FLAGS`、alias ceiling 16。
+
+## 下一步
+
+1. 编译选项方向已覆盖native、fast-math组合、alias ceiling和parenthesis重结合；
+   后续不再进行全程序flag搜索。
+2. 保持5.1资源配置和5.3通信结构；下一项必须由当前正式profile或硬件计数定位，
+   并针对单个kernel实施。
+3. 对任何短测低于1%的候选继续强制正式`t=40`验证，不能仅按`t=2/t=10`保留。
+
+### O78：chebft_Zeros inv=1 路径复用 cos 查找表
+
+状态：**保留；devpod 正确性验证通过，计算节点 A/B 待验证**。
+
+日期：2026-08-21。
+
+profiler 证据：`__cos` 占 TwoPuncture 22.92%（O19 baseline 采样）。O19 只为
+`chebft_Zeros` 的 inv=0（正变换）做了 cos 查找表，**inv=1（逆变换）仍直接调用
+`cos()`**。`Derivatives_AB3` 中 inv=1 调用频率约为 inv=0 的 2-3 倍，共约 6500 次
+inv=1 调用 × 2500 次 cos = 1625 万次 cos() 调用 / Derivatives_AB3。
+
+数学依据：inv=1 需要 `cos(Pion * (j + 0.5) * k) = cos(Pion * k * (j + 0.5))`。
+已有表 `pc_cos_cheb_zeros[j * n_cheb + k] = cos(Pion * j * (k + 0.5))`。
+转置索引：`pc_cos_cheb_zeros[k * n_cheb + j] = cos(Pion * k * (j + 0.5))` 完全匹配。
+`isignum = (-1)^k` 仍需单独乘（不在表中）。
+
+修改文件和关键位置：
+- `src/TwoPunctures.C:804`：`cos(Pion * (j + 0.5) * k)` 替换为
+  `pc_cos_cheb_zeros[(size_t)k * pc_n_cheb_zeros + j]`。
+
+devpod 4 线程正确性 A/B（baseline = O69 代码，candidate = O78）：
+
+| 指标 | baseline | O78 |
+|------|---------|-----|
+| BiCGStab 总迭代 | 88 | 89 |
+| Newton |F| | 1.497e-13 | 2.369e-13 |
+| 裸质量 mp/mm | 0.576976 / 0.378578 | 完全一致 |
+| ADM Mp/Mm | 0.598837 / 0.401163 | 完全一致 |
+| Ansorg.psid 最大相对误差 | — | 3.58e-12 |
+| puncture_parameters_new.txt | — | 位级一致 |
+
+正确性 PASS。数值差异在浮点 roundoff 级别（3.58e-12），来自查找表 cos 值与
+直接 cos() 的精度差，通过 BiCGStab 迭代放大到 roundoff 级。
+
+决定与下一步：保留。消除约 29 亿次 `cos()` 调用，预期 TwoPuncture 阶段收益
+~15-19s（17-22%）。需要在计算节点验证端到端收益和正式 `t=40` 正确性。
+
+### O79：并行化 TwoPuncture 串行段 Derivatives_AB3/F_of_v/J_times_dv
+
+状态：**保留；devpod 正确性验证通过，计算节点 A/B 待验证**。
+
+日期：2026-08-21。
+
+profiler 证据：TwoPunctureABE 中仅 `relax`（~60%时间）使用 30 线程 OpenMP。
+其余 ~40%——`Derivatives_AB3`、`F_of_v`、`J_times_dv`——完全串行，30 线程
+全部空闲。TwoPunctureABE 是独立进程无 MPI，O15 的"串行段提供 MPI progress
+overlap"教训不适用。
+
+修改文件和关键位置：
+- `src/TwoPunctures.C` `Derivatives_AB3`：3 个方向各有独立的 (j,k)/(i,k)/(i,j)
+  外层循环。用 `#pragma omp parallel` + 3 个 `#pragma omp for collapse(2)` 并行化，
+  工作区数组（p,dp,d2p,q,dq,r,dr,indx）改为每线程私有（在 parallel 区域内分配）。
+- `src/TwoPunctures.C` `F_of_v`：主 (k,j,i) 循环用 `#pragma omp for collapse(3)`
+  并行化。`values` 和 `U` 改为每线程私有。移除了 `if(0)` 调试死代码块。
+- `src/TwoPunctures.C` `J_times_dv`：主 (k,j,i) 循环用 `#pragma omp for collapse(3)`
+  并行化。原来共享的 `ws_dU/ws_U/ws_values` 改为每线程私有 `dU/U/values`。
+
+devpod 4 线程正确性 A/B（baseline = O78, candidate = O78+O79）：
+
+| 指标 | O78 (serial) | O78+O79 (parallel) |
+|------|-------------|-------------------|
+| BiCGStab 总迭代 | 89 | 85 |
+| Newton 最终 |F| | 2.369e-13 | 2.091e-13 |
+| 裸质量 mp/mm | 0.576976 / 0.378578 | 完全一致 |
+| ADM Mp/Mm | 0.598837 / 0.401163 | 完全一致 |
+| Ansorg.psid 最大相对误差 | — | 1.20e-11 |
+| puncture_parameters_new.txt | — | 位级一致 |
+| 4 线程 wall time（粗估） | ~285s | ~100s (2.85x) |
+
+正确性 PASS。数值差异在 roundoff 级别（1.20e-11），来自并行循环中不同的浮点
+求和顺序。BiCGStab 迭代数从 89 降至 85（可能因浮点路径变化导致更优收敛）。
+
+决定与下一步：保留。预期 30 核计算节点上将 TwoPuncture 串行段（~40%即~28s）
+加速至 ~1-2s，端到端收益约 25-35s。需要计算节点验证。
+
+### O80：ABE 侧小优化批量（P2-4 + P3-1 + P3-2）
+
+状态：**保留；编译通过，计算节点 A/B 待验证**。
+
+日期：2026-08-21。
+
+#### P2-4：transfer/transfermix 指针数组 static 化
+
+profiler 证据：`transfer()` 和 `transfermix()` 中 `send_data`/`rec_data` 指针数组
+（`new double*[cpusize]`，30 个指针 = 240 字节）每次调用都 alloc/free。每步约
+938 次 transfer，共约 2000 次 240 字节 malloc/free。
+
+修改文件和关键位置：
+- `src/Parallel.C` transfer()：`send_data`/`rec_data` 指针数组改为 static
+  （`s_send_ptrs`/`s_rec_ptrs`），按需扩容，不释放。数据缓冲区仍为 `new[]/delete[]`。
+- `src/Parallel.C` transfermix()：同样改为 static（`s_mix_send_ptrs`/`s_mix_rec_ptrs`）。
+- 移除两处 `delete[] send_data; delete[] rec_data;`。
+
+关键区别于 O21A（已回退）：O21A 将**数据缓冲区**（MB 级）做 static，导致 page cache
+污染。P2-4 仅将**指针数组**（240 字节）做 static，不涉及大块持久内存。
+
+#### P3-1：移除 monitor::writefile 的 flush()
+
+profiler 证据：`monitor.C` 的 `writefile()` 和 `print_message()` 每次写一行后都
+`flush(outfile)`，强制 OS 写回。t=40 约 40 次 analysis × 4 文件 = ~160 次强制 flush。
+
+修改文件和关键位置：
+- `src/monitor.C:144,159,167`：移除 3 处 `flush(outfile)`。
+- 依赖程序退出时的析构 close（`monitor.C:131` 的 `outfile.close()`）。
+
+#### P3-2：MPI_Bcast abort flag 降频
+
+profiler 证据：`bssn_class.C:1913` 每步都做 `MPI_Bcast(&abortFlag, 1, MPI_INT, ...)`，
+仅为传播 stdin "stop" 命令。批处理运行中永远不会用到。
+
+修改文件和关键位置：
+- `src/bssn_class.C:1900-1913`：改为每 10 步检查一次 stdin 并 Bcast。
+
+#### 跳过的优化及原因
+
+| 优化 | 跳过原因 |
+|------|---------|
+| P0-3 预分配工作区 | 预期收益 <1s（malloc overhead ~0.23s），工程量大 |
+| P1-1 消除重复 RHS | 分析发现 Interp_Constraint(false) 被 if(infg) 门控，无重复计算 |
+| P1-2 消除 data_packer measure | 需重构 gridseg 结构体，复杂度高 |
+| P2-1 合并 L2Norm_7 Allreduce | 每次 Allreduce 7 doubles ≈ 50μs，9 次 × 40 触发 < 20ms |
+| P2-2 合并 surf_Wave Allreduce | 同上，收益极小 |
+| P2-3 预计算 inv_chin1 | 除法→倒数乘法改变浮点语义，R76/R77 教训表明有收敛风险 |
+
+决定与下一步：保留 P2-4/P3-1/P3-2。三项均不增加持久内存，不受 page cache
+污染影响。需要在计算节点验证端到端收益（预期 <5s，但无退化风险）。

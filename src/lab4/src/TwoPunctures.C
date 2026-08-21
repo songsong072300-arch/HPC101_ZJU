@@ -801,7 +801,7 @@ void TwoPunctures::chebft_Zeros(double u[], int n, int inv)
       isignum = 1;
       for (k = 0; k < n; k++)
       {
-        sum += u[k] * cos(Pion * (j + 0.5) * k) * isignum;
+        sum += u[k] * pc_cos_cheb_zeros[(size_t)k * pc_n_cheb_zeros + j] * isignum;
         isignum = -isignum;
       }
       c[j] = sum;
@@ -1241,108 +1241,121 @@ void TwoPunctures::rx3_To_xyz(int nvar, double x, double r, double phi,
 /* --------------------------------------------------------------------------*/
 void TwoPunctures::Derivatives_AB3(int nvar, int n1, int n2, int n3, derivs v)
 {
-  int i, j, k, ivar, N, *indx;
-  double *p, *dp, *d2p, *q, *dq, *r, *dr;
+  int N = maximum3(n1, n2, n3);
 
-  N = maximum3(n1, n2, n3);
-  p = dvector(0, N);
-  dp = dvector(0, N);
-  d2p = dvector(0, N);
-  q = dvector(0, N);
-  dq = dvector(0, N);
-  r = dvector(0, N);
-  dr = dvector(0, N);
-  indx = ivector(0, N);
-
-  for (ivar = 0; ivar < nvar; ivar++)
+#pragma omp parallel
   {
-    for (k = 0; k < n3; k++)
-    { /* Calculation of Derivatives w.r.t. A-Dir. */
-      for (j = 0; j < n2; j++)
-      { /* (Chebyshev_Zeros)*/
-        for (i = 0; i < n1; i++)
-        {
-          indx[i] = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          p[i] = v.d0[indx[i]];
-        }
-        chebft_Zeros(p, n1, 0);
-        chder(p, dp, n1);
-        chder(dp, d2p, n1);
-        chebft_Zeros(dp, n1, 1);
-        chebft_Zeros(d2p, n1, 1);
-        for (i = 0; i < n1; i++)
-        {
-          v.d1[indx[i]] = dp[i];
-          v.d11[indx[i]] = d2p[i];
-        }
-      }
-    }
-    for (k = 0; k < n3; k++)
-    { /* Calculation of Derivatives w.r.t. B-Dir. */
-      for (i = 0; i < n1; i++)
-      { /* (Chebyshev_Zeros)*/
-        for (j = 0; j < n2; j++)
-        {
-          indx[j] = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          p[j] = v.d0[indx[j]];
-          q[j] = v.d1[indx[j]];
-        }
-        chebft_Zeros(p, n2, 0);
-        chebft_Zeros(q, n2, 0);
-        chder(p, dp, n2);
-        chder(dp, d2p, n2);
-        chder(q, dq, n2);
-        chebft_Zeros(dp, n2, 1);
-        chebft_Zeros(d2p, n2, 1);
-        chebft_Zeros(dq, n2, 1);
-        for (j = 0; j < n2; j++)
-        {
-          v.d2[indx[j]] = dp[j];
-          v.d22[indx[j]] = d2p[j];
-          v.d12[indx[j]] = dq[j];
-        }
-      }
-    }
-    for (i = 0; i < n1; i++)
-    { /* Calculation of Derivatives w.r.t. phi-Dir. (Fourier)*/
-      for (j = 0; j < n2; j++)
+    int i, j, k, ivar, *indx;
+    double *p, *dp, *d2p, *q, *dq, *r, *dr;
+
+    indx = ivector(0, N);
+    p = dvector(0, N);
+    dp = dvector(0, N);
+    d2p = dvector(0, N);
+    q = dvector(0, N);
+    dq = dvector(0, N);
+    r = dvector(0, N);
+    dr = dvector(0, N);
+
+    for (ivar = 0; ivar < nvar; ivar++)
+    {
+      /* Calculation of Derivatives w.r.t. A-Dir. (Chebyshev_Zeros) */
+#pragma omp for collapse(2) schedule(static)
+      for (k = 0; k < n3; k++)
       {
-        for (k = 0; k < n3; k++)
+        for (j = 0; j < n2; j++)
         {
-          indx[k] = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          p[k] = v.d0[indx[k]];
-          q[k] = v.d1[indx[k]];
-          r[k] = v.d2[indx[k]];
+          for (i = 0; i < n1; i++)
+          {
+            indx[i] = Index(ivar, i, j, k, nvar, n1, n2, n3);
+            p[i] = v.d0[indx[i]];
+          }
+          chebft_Zeros(p, n1, 0);
+          chder(p, dp, n1);
+          chder(dp, d2p, n1);
+          chebft_Zeros(dp, n1, 1);
+          chebft_Zeros(d2p, n1, 1);
+          for (i = 0; i < n1; i++)
+          {
+            v.d1[indx[i]] = dp[i];
+            v.d11[indx[i]] = d2p[i];
+          }
         }
-        fourft(p, n3, 0);
-        fourder(p, dp, n3);
-        fourder2(p, d2p, n3);
-        fourft(dp, n3, 1);
-        fourft(d2p, n3, 1);
-        fourft(q, n3, 0);
-        fourder(q, dq, n3);
-        fourft(dq, n3, 1);
-        fourft(r, n3, 0);
-        fourder(r, dr, n3);
-        fourft(dr, n3, 1);
-        for (k = 0; k < n3; k++)
+      }
+
+      /* Calculation of Derivatives w.r.t. B-Dir. (Chebyshev_Zeros) */
+#pragma omp for collapse(2) schedule(static)
+      for (k = 0; k < n3; k++)
+      {
+        for (i = 0; i < n1; i++)
         {
-          v.d3[indx[k]] = dp[k];
-          v.d33[indx[k]] = d2p[k];
-          v.d13[indx[k]] = dq[k];
-          v.d23[indx[k]] = dr[k];
+          for (j = 0; j < n2; j++)
+          {
+            indx[j] = Index(ivar, i, j, k, nvar, n1, n2, n3);
+            p[j] = v.d0[indx[j]];
+            q[j] = v.d1[indx[j]];
+          }
+          chebft_Zeros(p, n2, 0);
+          chebft_Zeros(q, n2, 0);
+          chder(p, dp, n2);
+          chder(dp, d2p, n2);
+          chder(q, dq, n2);
+          chebft_Zeros(dp, n2, 1);
+          chebft_Zeros(d2p, n2, 1);
+          chebft_Zeros(dq, n2, 1);
+          for (j = 0; j < n2; j++)
+          {
+            v.d2[indx[j]] = dp[j];
+            v.d22[indx[j]] = d2p[j];
+            v.d12[indx[j]] = dq[j];
+          }
+        }
+      }
+
+      /* Calculation of Derivatives w.r.t. phi-Dir. (Fourier) */
+#pragma omp for collapse(2) schedule(static)
+      for (i = 0; i < n1; i++)
+      {
+        for (j = 0; j < n2; j++)
+        {
+          for (k = 0; k < n3; k++)
+          {
+            indx[k] = Index(ivar, i, j, k, nvar, n1, n2, n3);
+            p[k] = v.d0[indx[k]];
+            q[k] = v.d1[indx[k]];
+            r[k] = v.d2[indx[k]];
+          }
+          fourft(p, n3, 0);
+          fourder(p, dp, n3);
+          fourder2(p, d2p, n3);
+          fourft(dp, n3, 1);
+          fourft(d2p, n3, 1);
+          fourft(q, n3, 0);
+          fourder(q, dq, n3);
+          fourft(dq, n3, 1);
+          fourft(r, n3, 0);
+          fourder(r, dr, n3);
+          fourft(dr, n3, 1);
+          for (k = 0; k < n3; k++)
+          {
+            v.d3[indx[k]] = dp[k];
+            v.d33[indx[k]] = d2p[k];
+            v.d13[indx[k]] = dq[k];
+            v.d23[indx[k]] = dr[k];
+          }
         }
       }
     }
+
+    free_dvector(p, 0, N);
+    free_dvector(dp, 0, N);
+    free_dvector(d2p, 0, N);
+    free_dvector(q, 0, N);
+    free_dvector(dq, 0, N);
+    free_dvector(r, 0, N);
+    free_dvector(dr, 0, N);
+    free_ivector(indx, 0, N);
   }
-  free_dvector(p, 0, N);
-  free_dvector(dp, 0, N);
-  free_dvector(d2p, 0, N);
-  free_dvector(q, 0, N);
-  free_dvector(dq, 0, N);
-  free_dvector(r, 0, N);
-  free_dvector(dr, 0, N);
-  free_ivector(indx, 0, N);
 }
 /* --------------------------------------------------------------------------*/
 void TwoPunctures::Newton(int const nvar, int const n1, int const n2, int const n3,
@@ -1406,35 +1419,40 @@ void TwoPunctures::F_of_v(int nvar, int n1, int n2, int n3, derivs v, double *F,
   /*      (u.d1[], u.d2[], u.d3[], u.d11[], u.d12[], u.d13[], u.d22[], u.d23[], u.d33[])*/
   /*      at interior points and at the boundaries "+/-"*/
 
-  int i, j, k, ivar, indx;
-  double al, be, A, B, X, R, x, r, phi, y, z, Am1, *values;
-  derivs U;
+  int i, j, k;
   double *sources;
 
-  values = dvector(0, nvar - 1);
-  allocate_derivs(&U, nvar);
-
   sources = (double *)calloc(n1 * n2 * n3, sizeof(double));
-  if (0)
+  for (i = 0; i < n1; i++)
+    for (j = 0; j < n2; j++)
+      for (k = 0; k < n3; k++)
+        sources[Index(0, i, j, k, 1, n1, n2, n3)] = 0.0;
+
+  Derivatives_AB3(nvar, n1, n2, n3, v);
+
+#pragma omp parallel
   {
-    double *s_x, *s_y, *s_z;
-    int i3D;
-    s_x = (double *)calloc(n1 * n2 * n3, sizeof(double));
-    s_y = (double *)calloc(n1 * n2 * n3, sizeof(double));
-    s_z = (double *)calloc(n1 * n2 * n3, sizeof(double));
-    for (i = 0; i < n1; i++)
+    int i, j, k, ivar, indx;
+    double al, be, A, B, X, R, x, r, phi, y, z, Am1;
+    double *values = dvector(0, nvar - 1);
+    derivs U;
+    allocate_derivs(&U, nvar);
+
+#pragma omp for collapse(3) schedule(static)
+    for (k = 0; k < n3; k++)
+    {
       for (j = 0; j < n2; j++)
-        for (k = 0; k < n3; k++)
+      {
+        for (i = 0; i < n1; i++)
         {
-          i3D = Index(0, i, j, k, 1, n1, n2, n3);
 
           al = Pih * (2 * i + 1) / n1;
-          A = -cos(al);
+          A = -pc_cos_al[i];
           be = Pih * (2 * j + 1) / n2;
-          B = -cos(be);
+          B = -pc_cos_be[j];
           phi = 2. * Pi * k / n3;
 
-          Am1 = A - 1;
+          Am1 = pc_Am1[i];
           for (ivar = 0; ivar < nvar; ivar++)
           {
             indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
@@ -1454,123 +1472,35 @@ void TwoPunctures::F_of_v(int nvar, int n1, int n2, int n3, derivs v, double *F,
           AB_To_XR(nvar, A, B, &X, &R, U);
           /* Calculation of (x,r) and*/
           /* (U, U_x, U_r, U_3, U_xx, U_xr, U_x3, U_rr, U_r3, U_33)*/
-          C_To_c(nvar, X, R, &(s_x[i3D]), &r, U);
+          C_To_c(nvar, X, R, &x, &r, U);
           /* Calculation of (y,z) and*/
           /* (U, U_x, U_y, U_z, U_xx, U_xy, U_xz, U_yy, U_yz, U_zz)*/
-          rx3_To_xyz(nvar, s_x[i3D], r, phi, &(s_y[i3D]), &(s_z[i3D]), U);
-        }
-    free(s_z);
-    free(s_y);
-    free(s_x);
-  }
-  else
-    for (i = 0; i < n1; i++)
-      for (j = 0; j < n2; j++)
-        for (k = 0; k < n3; k++)
-          sources[Index(0, i, j, k, 1, n1, n2, n3)] = 0.0;
-
-  Derivatives_AB3(nvar, n1, n2, n3, v);
-  double psi, psi2, psi4, psi7, r_plus, r_minus;
-  FILE *debugfile = NULL;
-  if (0)
-  {
-    debugfile = fopen("res.dat", "w");
-    assert(debugfile);
-  }
-  for (k = 0; k < n3; k++)
-  {
-    for (j = 0; j < n2; j++)
-    {
-      for (i = 0; i < n1; i++)
-      {
-
-        al = Pih * (2 * i + 1) / n1;
-        A = -pc_cos_al[i];
-        be = Pih * (2 * j + 1) / n2;
-        B = -pc_cos_be[j];
-        phi = 2. * Pi * k / n3;
-
-        Am1 = pc_Am1[i];
-        for (ivar = 0; ivar < nvar; ivar++)
-        {
-          indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          U.d0[ivar] = Am1 * v.d0[indx];                    /* U*/
-          U.d1[ivar] = v.d0[indx] + Am1 * v.d1[indx];       /* U_A*/
-          U.d2[ivar] = Am1 * v.d2[indx];                    /* U_B*/
-          U.d3[ivar] = Am1 * v.d3[indx];                    /* U_3*/
-          U.d11[ivar] = 2 * v.d1[indx] + Am1 * v.d11[indx]; /* U_AA*/
-          U.d12[ivar] = v.d2[indx] + Am1 * v.d12[indx];     /* U_AB*/
-          U.d13[ivar] = v.d3[indx] + Am1 * v.d13[indx];     /* U_AB*/
-          U.d22[ivar] = Am1 * v.d22[indx];                  /* U_BB*/
-          U.d23[ivar] = Am1 * v.d23[indx];                  /* U_B3*/
-          U.d33[ivar] = Am1 * v.d33[indx];                  /* U_33*/
-        }
-        /* Calculation of (X,R) and*/
-        /* (U_X, U_R, U_3, U_XX, U_XR, U_X3, U_RR, U_R3, U_33)*/
-        AB_To_XR(nvar, A, B, &X, &R, U);
-        /* Calculation of (x,r) and*/
-        /* (U, U_x, U_r, U_3, U_xx, U_xr, U_x3, U_rr, U_r3, U_33)*/
-        C_To_c(nvar, X, R, &x, &r, U);
-        /* Calculation of (y,z) and*/
-        /* (U, U_x, U_y, U_z, U_xx, U_xy, U_xz, U_yy, U_yz, U_zz)*/
-        rx3_To_xyz(nvar, x, r, phi, &y, &z, U);
-        NonLinEquations(sources[Index(0, i, j, k, 1, n1, n2, n3)],
-                        A, B, X, R, x, r, phi, y, z, U, values);
-        for (ivar = 0; ivar < nvar; ivar++)
-        {
-          indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          F[indx] = values[ivar] * pc_fac[(size_t)i * n2 + j];
-          /* if ((i<5) && ((j<5) || (j>n2-5)))*/
-          /*     F[indx] = 0.0;*/
-          u.d0[indx] = U.d0[ivar];   /*  U*/
-          u.d1[indx] = U.d1[ivar];   /*      U_x*/
-          u.d2[indx] = U.d2[ivar];   /*      U_y*/
-          u.d3[indx] = U.d3[ivar];   /*      U_z*/
-          u.d11[indx] = U.d11[ivar]; /*      U_xx*/
-          u.d12[indx] = U.d12[ivar]; /*      U_xy*/
-          u.d13[indx] = U.d13[ivar]; /*      U_xz*/
-          u.d22[indx] = U.d22[ivar]; /*      U_yy*/
-          u.d23[indx] = U.d23[ivar]; /*      U_yz*/
-          u.d33[indx] = U.d33[ivar]; /*      U_zz*/
-        }
-        if (debugfile && (k == 0))
-        {
-          r_plus = sqrt((x - par_b) * (x - par_b) + y * y + z * z);
-          r_minus = sqrt((x + par_b) * (x + par_b) + y * y + z * z);
-          psi = 1. +
-                0.5 * par_m_plus / r_plus +
-                0.5 * par_m_minus / r_minus +
-                U.d0[0];
-          psi2 = psi * psi;
-          psi4 = psi2 * psi2;
-          psi7 = psi * psi2 * psi4;
-          fprintf(debugfile,
-                  "%.16g %.16g %.16g %.16g %.16g %.16g %.16g %.16g\n",
-                  (double)x, (double)y, (double)A, (double)B,
-                  (double)(U.d11[0] +
-                           U.d22[0] +
-                           U.d33[0] +
-                           /*                      0.125 * BY_KKofxyz (x, y, z) / psi7 +*/
-                           (2.0 * Pi / psi2 / psi * sources[indx]) * FAC),
-                  (double)((U.d11[0] +
-                            U.d22[0] +
-                            U.d33[0]) *
-                           FAC),
-                  (double)(-(2.0 * Pi / psi2 / psi * sources[indx]) * FAC),
-                  (double)sources[indx]
-                  /*(double)F[indx]*/
-          );
+          rx3_To_xyz(nvar, x, r, phi, &y, &z, U);
+          NonLinEquations(sources[Index(0, i, j, k, 1, n1, n2, n3)],
+                          A, B, X, R, x, r, phi, y, z, U, values);
+          for (ivar = 0; ivar < nvar; ivar++)
+          {
+            indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
+            F[indx] = values[ivar] * pc_fac[(size_t)i * n2 + j];
+            u.d0[indx] = U.d0[ivar];   /*  U*/
+            u.d1[indx] = U.d1[ivar];   /*      U_x*/
+            u.d2[indx] = U.d2[ivar];   /*      U_y*/
+            u.d3[indx] = U.d3[ivar];   /*      U_z*/
+            u.d11[indx] = U.d11[ivar]; /*      U_xx*/
+            u.d12[indx] = U.d12[ivar]; /*      U_xy*/
+            u.d13[indx] = U.d13[ivar]; /*      U_xz*/
+            u.d22[indx] = U.d22[ivar]; /*      U_yy*/
+            u.d23[indx] = U.d23[ivar]; /*      U_yz*/
+            u.d33[indx] = U.d33[ivar]; /*      U_zz*/
+          }
         }
       }
     }
-  }
-  if (debugfile)
-  {
-    fclose(debugfile);
+
+    free_dvector(values, 0, nvar - 1);
+    free_derivs(&U, nvar);
   }
   free(sources);
-  free_dvector(values, 0, nvar - 1);
-  free_derivs(&U, nvar);
 }
 /* --------------------------------------------------------------------------*/
 double TwoPunctures::norm_inf(double const *F, int const ntotal)
@@ -1966,73 +1896,80 @@ void TwoPunctures::SetMatrix_JFD(int nvar, int n1, int n2, int n3, derivs u,
 }
 /* --------------------------------------------------------------------------*/
 void TwoPunctures::J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, double *Jdv, derivs u)
-{ /*      Calculates the left hand sides of the non-linear equations F_m(v_n)=0*/
-  /*      and the function u (u.d0[]) as well as its derivatives*/
-  /*      (u.d1[], u.d2[], u.d3[], u.d11[], u.d12[], u.d13[], u.d22[], u.d23[], u.d33[])*/
-  /*      at interior points and at the boundaries "+/-"*/
-  int i, j, k, ivar, indx;
-  double al, be, A, B, X, R, x, r, phi, y, z, Am1;
-  derivs &dU = ws_dU;
-  derivs &U  = ws_U;
-  double *values = ws_values;
-
+{
   Derivatives_AB3(nvar, n1, n2, n3, dv);
 
-  for (k = 0; k < n3; k++)
+#pragma omp parallel
   {
-    for (j = 0; j < n2; j++)
+    int i, j, k, ivar, indx;
+    double al, be, A, B, X, R, x, r, phi, y, z, Am1;
+    derivs dU;
+    allocate_derivs(&dU, nvar);
+    derivs U;
+    allocate_derivs(&U, nvar);
+    double *values = dvector(0, nvar - 1);
+
+#pragma omp for collapse(3) schedule(static)
+    for (k = 0; k < n3; k++)
     {
-      for (i = 0; i < n1; i++)
+      for (j = 0; j < n2; j++)
       {
-
-        al = Pih * (2 * i + 1) / n1;
-        A = -pc_cos_al[i];
-        be = Pih * (2 * j + 1) / n2;
-        B = -pc_cos_be[j];
-        phi = 2. * Pi * k / n3;
-
-        Am1 = pc_Am1[i];
-        for (ivar = 0; ivar < nvar; ivar++)
+        for (i = 0; i < n1; i++)
         {
-          indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          dU.d0[ivar] = Am1 * dv.d0[indx];                     /* dU*/
-          dU.d1[ivar] = dv.d0[indx] + Am1 * dv.d1[indx];       /* dU_A*/
-          dU.d2[ivar] = Am1 * dv.d2[indx];                     /* dU_B*/
-          dU.d3[ivar] = Am1 * dv.d3[indx];                     /* dU_3*/
-          dU.d11[ivar] = 2 * dv.d1[indx] + Am1 * dv.d11[indx]; /* dU_AA*/
-          dU.d12[ivar] = dv.d2[indx] + Am1 * dv.d12[indx];     /* dU_AB*/
-          dU.d13[ivar] = dv.d3[indx] + Am1 * dv.d13[indx];     /* dU_AB*/
-          dU.d22[ivar] = Am1 * dv.d22[indx];                   /* dU_BB*/
-          dU.d23[ivar] = Am1 * dv.d23[indx];                   /* dU_B3*/
-          dU.d33[ivar] = Am1 * dv.d33[indx];                   /* dU_33*/
-          U.d0[ivar] = u.d0[indx];                             /* U   */
-          U.d1[ivar] = u.d1[indx];                             /* U_x*/
-          U.d2[ivar] = u.d2[indx];                             /* U_y*/
-          U.d3[ivar] = u.d3[indx];                             /* U_z*/
-          U.d11[ivar] = u.d11[indx];                           /* U_xx*/
-          U.d12[ivar] = u.d12[indx];                           /* U_xy*/
-          U.d13[ivar] = u.d13[indx];                           /* U_xz*/
-          U.d22[ivar] = u.d22[indx];                           /* U_yy*/
-          U.d23[ivar] = u.d23[indx];                           /* U_yz*/
-          U.d33[ivar] = u.d33[indx];                           /* U_zz*/
-        }
-        /* Calculation of (X,R) and*/
-        /* (dU_X, dU_R, dU_3, dU_XX, dU_XR, dU_X3, dU_RR, dU_R3, dU_33)*/
-        AB_To_XR(nvar, A, B, &X, &R, dU);
-        /* Calculation of (x,r) and*/
-        /* (dU, dU_x, dU_r, dU_3, dU_xx, dU_xr, dU_x3, dU_rr, dU_r3, dU_33)*/
-        C_To_c(nvar, X, R, &x, &r, dU);
-        /* Calculation of (y,z) and*/
-        /* (dU, dU_x, dU_y, dU_z, dU_xx, dU_xy, dU_xz, U_yy, dU_yz, dU_zz)*/
-        rx3_To_xyz(nvar, x, r, phi, &y, &z, dU);
-        LinEquations(A, B, X, R, x, r, phi, y, z, dU, U, values);
-        for (ivar = 0; ivar < nvar; ivar++)
-        {
-          indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
-          Jdv[indx] = values[ivar] * pc_fac[(size_t)i * n2 + j];
+
+          al = Pih * (2 * i + 1) / n1;
+          A = -pc_cos_al[i];
+          be = Pih * (2 * j + 1) / n2;
+          B = -pc_cos_be[j];
+          phi = 2. * Pi * k / n3;
+
+          Am1 = pc_Am1[i];
+          for (ivar = 0; ivar < nvar; ivar++)
+          {
+            indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
+            dU.d0[ivar] = Am1 * dv.d0[indx];                     /* dU*/
+            dU.d1[ivar] = dv.d0[indx] + Am1 * dv.d1[indx];       /* dU_A*/
+            dU.d2[ivar] = Am1 * dv.d2[indx];                     /* dU_B*/
+            dU.d3[ivar] = Am1 * dv.d3[indx];                     /* dU_3*/
+            dU.d11[ivar] = 2 * dv.d1[indx] + Am1 * dv.d11[indx]; /* dU_AA*/
+            dU.d12[ivar] = dv.d2[indx] + Am1 * dv.d12[indx];     /* dU_AB*/
+            dU.d13[ivar] = dv.d3[indx] + Am1 * dv.d13[indx];     /* dU_AB*/
+            dU.d22[ivar] = Am1 * dv.d22[indx];                   /* dU_BB*/
+            dU.d23[ivar] = Am1 * dv.d23[indx];                   /* dU_B3*/
+            dU.d33[ivar] = Am1 * dv.d33[indx];                   /* dU_33*/
+            U.d0[ivar] = u.d0[indx];                             /* U   */
+            U.d1[ivar] = u.d1[indx];                             /* U_x*/
+            U.d2[ivar] = u.d2[indx];                             /* U_y*/
+            U.d3[ivar] = u.d3[indx];                             /* U_z*/
+            U.d11[ivar] = u.d11[indx];                           /* U_xx*/
+            U.d12[ivar] = u.d12[indx];                           /* U_xy*/
+            U.d13[ivar] = u.d13[indx];                           /* U_xz*/
+            U.d22[ivar] = u.d22[indx];                           /* U_yy*/
+            U.d23[ivar] = u.d23[indx];                           /* U_yz*/
+            U.d33[ivar] = u.d33[indx];                           /* U_zz*/
+          }
+          /* Calculation of (X,R) and*/
+          /* (dU_X, dU_R, dU_3, dU_XX, dU_XR, dU_X3, dU_RR, dU_R3, dU_33)*/
+          AB_To_XR(nvar, A, B, &X, &R, dU);
+          /* Calculation of (x,r) and*/
+          /* (dU, dU_x, dU_r, dU_3, dU_xx, dU_xr, dU_x3, dU_rr, dU_r3, dU_33)*/
+          C_To_c(nvar, X, R, &x, &r, dU);
+          /* Calculation of (y,z) and*/
+          /* (dU, dU_x, dU_y, dU_z, dU_xx, dU_xy, dU_xz, U_yy, dU_yz, dU_zz)*/
+          rx3_To_xyz(nvar, x, r, phi, &y, &z, dU);
+          LinEquations(A, B, X, R, x, r, phi, y, z, dU, U, values);
+          for (ivar = 0; ivar < nvar; ivar++)
+          {
+            indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
+            Jdv[indx] = values[ivar] * pc_fac[(size_t)i * n2 + j];
+          }
         }
       }
     }
+
+    free_dvector(values, 0, nvar - 1);
+    free_derivs(&dU, nvar);
+    free_derivs(&U, nvar);
   }
 }
 /* --------------------------------------------------------------------------*/
