@@ -5001,3 +5001,49 @@ self 热点排名仍适用于当前 ABE 代码（O78+O79 未修改任何 ABE 源
 - t=10 端到端 A/B: 185.1s → 146.2s (-21.0%)
 - TwoPuncture: 69.5s → 30.5s (-56.1%)
 - 正确性: PASS (constraints 一致, trajectory 覆盖范围不匹配非数值误差)
+
+### R86：NRELAX=225 微调
+
+状态：**已回退（t=10 A/B 方向不一致）**。
+
+日期：2026-08-22。
+
+O69 测试了 NRELAX=100/150/200/250，最优为 250。从未测试 225。
+
+devpod 4 线程正确性：BiCGStab 91 次（vs NRELAX=250 的 85 次），总 sweeps
+40950 vs 42500（少 1550）。Ansorg.psid max rel 3.08e-12，puncture params
+位级一致。
+
+计算节点 t=10 A/B（baseline=NRELAX=250, candidate=NRELAX=225）：
+
+| Run | baseline TwoPuncture | candidate TwoPuncture | diff |
+|-----|---:|---:|---:|
+| 1 | 34.92s | 32.09s | +2.83s |
+| 2 | 31.14s | 34.30s | -3.16s |
+| 3 | 32.50s | 32.73s | -0.23s |
+
+方向不一致（1 快 2 慢），中位数 32.50→32.73（慢 0.23s）。回退。
+
+### R87：-fipa-pta 过程间指针分析
+
+状态：**已回退（无效果）**。
+
+日期：2026-08-22。
+
+向量化报告显示 bssn_rhs.f90 有 322 处 "statement clobbers memory"，全部
+来自 fderivs/fdderivs 调用。`-fipa-pta` 可做过程间指针分析，但仅限单文件
+内有效。fderivs 在 diff_new.f90，调用在 bssn_rhs.f90，跨文件分析需 LTO
+（O32 已证明 -2.6% 退化）。
+
+验证：with/without `-fipa-pta` 的 clobbers memory 数量相同（322 vs 322）。
+回退。
+
+## 最终状态
+
+当前版本 O78+O79（NRELAX=250）已通过正式 t=40 验证：
+- Total Evolve: 448.6s
+- Program Cost: 477.9s
+- 正确性: PASS
+
+ABE 侧所有优化方向已穷尽（计算 kernel、通信、编译选项、内存操作）。
+TwoPuncture 侧 LineRelax+Thomas 占 85%（~25s），NRELAX 微调无稳定收益。
