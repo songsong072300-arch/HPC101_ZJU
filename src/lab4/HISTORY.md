@@ -4772,3 +4772,129 @@ diff 8.39e-12，BiCGStab 85 次（与 O78+O79 一致）。
 决定：回退。BY_KKofxyz 缓存理论收益 ~4-5s 但实测仅 0.73s。当前保留优化不变：
 O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20, O26(E1+E3),
 O39, O48, O50, O54, O55, O62, O63, O64(诊断), O69, O70, O72, O78, O79
+
+
+### R82：跨250次relaxation复用OpenMP team
+
+状态：**已回退（无稳定收益）**。
+
+日期：2026-08-22。
+
+profiler/结构证据：O78+O79后TwoPuncture约30.5秒，其中LineRelax与Thomas约18秒。
+BiCGStab每次迭代对ph和sh各执行NRELAX=250次relax()；约85次迭代会创建
+约42,500个OpenMP parallel region。候选将250次sweep移入relax()的同一个
+parallel region，同时保留每个red/black omp for的隐式barrier和数值更新顺序。
+
+修改文件和关键位置：
+- src/TwoPunctures.C：BiCGStab的两处250次调用循环改为各一次批量调用；
+  relax()增加sweeps参数并在现有red/black循环外增加sweep循环。
+- src/TwoPunctures.h：同步更新relax()声明。未修改NRELAX、稀疏矩阵、
+  Thomas算法、浮点表达式或ABE路径。
+
+计算节点无cache t=2 A/B（job 135504，baseline=O78+O79，30线程，交替3轮）：
+
+| 版本 | Program Cost | Total Evolve |
+|------|--------------|--------------|
+| baseline | 59.0663 / 54.1947 / 53.9897 s | 24.4247 / 24.1083 / 24.4055 s |
+| candidate | 56.8692 / 53.8875 / 54.9661 s | 23.9894 / 24.2115 / 24.0907 s |
+
+以Program Cost减Total Evolve估算初值及固定开销：
+baseline为34.6416 / 30.0864 / 29.5842秒，candidate为32.8798 / 29.6760 /
+30.8754秒；中位数由30.0864增至30.8754秒，候选慢2.62%，仅2/3配对更快。
+
+正确性：6轮均trajectory RMS=0、constraints PASS、FINAL: PASS。归档：
+test_archives/ab_20260822_024800_o82_relax_team_t2/。
+
+决定：完整回退。Arm libomp已复用worker team，显式把250次sweep放进一个
+parallel region没有稳定减少开销，反而延长team占用并放大运行波动。不再尝试
+跨NRELAX持久化team；保留O78+O79和原逐次relax()结构。
+
+## 下一步
+
+1. TwoPuncture下一项只考虑不改变relax同步结构的工作量削减；R65的稀疏槽位预分类
+   因runtime不一致尚无有效结论，可用当前统一Arm libomp重新做严格A/B。
+2. 端到端约469.93秒中TwoPuncture仅约30.5秒，主要优化预算已回到ABE；先采集
+   当前版本逐rank compute/pack/Waitall时间，确认2.5--4.3秒/步等待是否来自负载失衡。
+3. 不重试无异步progress的interior overlap、消息聚合、全程序编译flag或RHS融合。
+
+### O83：逐rank拆分pack/wait/unpack与网格负载探针
+
+状态：**分析完成；探针源码已回退**。
+
+日期：2026-08-22。
+
+动机：OJ报告每步约2.5--4.3秒等待，需判断这是可消除的纯空闲，还是各rank通信
+工作分配不同造成的同步记账差异。候选仅在 `AMSS_MPI_DIAGNOSTICS=1` 时累计
+transfer的pack/post、Waitall和unpack时间，并输出各rank、各level拥有的block数和
+含ghost网格点数；生产默认仍关闭诊断。
+
+计算节点 `t=2` 探针（job 135583，30 MPI x 2 OMP）：
+
+| 指标 | step 1 | step 2 |
+|------|--------|--------|
+| RecursiveStep | 11.984 s | 11.547 s |
+| rank wait范围 | 1.389--3.809 s | 1.126--3.601 s |
+| rank pack范围 | 0.315--1.770 s | 0.316--1.765 s |
+| rank unpack范围 | 0.110--0.174 s | 0.114--0.187 s |
+| active proxy范围 | 7.839--9.022 s | 7.587--8.824 s |
+
+两步均rank 16等待最少但pack最高，rank 27等待最高但pack接近最低。两步平均后的
+Pearson相关系数：pack与wait为 **-0.837**，各level按时间细化粗加权点数与active
+仅0.259，总点数与active为0.494。RecursiveStep在通信同步后各rank wall imbalance
+仅1.0003和1.00005。
+
+正确性：trajectory RMS=0、constraints PASS、`FINAL: PASS`。归档：
+`test_archives/rank_balance_20260822_030357/`。第二次补充volume探针job 135598在
+setup阶段异常停滞且无ABE数据，已取消，不纳入结论。
+
+结论：OJ的3--4秒Waitall不能直接视为可隐藏预算；很大部分是pack较少的rank更早
+到达同步点。简单按网格点重新分块缺乏证据，可能把计算负载和通信拓扑同时变差。
+真正的临界rank是pack较重的rank 16，其 `active+pack` 两步平均约10.52秒；因此
+下一步应减少ghost pack工作本身，而不是继续调整Waitall或盲目重映射rank。
+
+## 下一步
+
+1. 以 `Parallel::transfer/data_packer` 为目标，量化NULL measure pass、实际PACK、
+   本地copy和MPI post各自占比；一次只消除或缓存measure pass，保持消息次序不变。
+2. 若measure pass占比足够，给已构造的transfer segment list缓存每peer元素数，避免
+   每次发送前再次遍历src/dst/VarList；不得持久化MB级数据buffer（O21A已失败）。
+3. 不做简单point-count rank redistribution；O83显示其与active相关性不足，且pack
+   才是最低wait rank的主要额外工作。
+
+### R84：same-rank同层ghost直接block-to-block copy
+
+状态：**已回退（正式长跑退化）**。
+
+日期：2026-08-22。
+
+O83证据显示最低wait的rank同时pack最重。原 `transfer()` 对node==myrank也先把
+同层source区域pack进临时连续buffer，再从buffer unpack到destination ghost，产生
+一次分配和两次内存复制。候选对同rank且source/destination level相同的segment pair
+直接调用 `f_copy` 从source block写入destination block；remote MPI、消息顺序、
+restrict/prolong和inter-level本地路径保持原样。
+
+计算节点A/B（30 MPI x 2 OMP、TwoPuncture cache、同一allocation交替）：
+
+| 测试 | baseline | candidate | 结果 |
+|------|----------|-----------|------|
+| `t=2`, job 135669 | 24.4923 / 24.0167 / 23.8501 s | 23.9252 / 23.8649 / 24.5084 s | 中位数快0.38%，2/3配对更快 |
+| `t=10`, job 135702 | 124.840 / 124.077 / 124.172 s | 123.841 / 123.408 / 123.512 s | 中位数快0.53%，3/3配对更快 |
+| `t=40`, job 135778 | 468.580 s | 470.047 s | **慢0.31%** |
+
+14轮均trajectory RMS=0、constraints PASS、`FINAL: PASS`。归档：
+`test_archives/ab_20260822_032054_o84_local_copy_t2/`、
+`test_archives/ab_20260822_032526_o84_local_copy_t10/`、
+`test_archives/ab_20260822_033953_o84_local_copy_t40/`。
+
+决定：完整回退。直接复制减少总字节但把连续buffer路径变成大量小region copy，
+长跑cache/locality效果反而略差。再次确认低于1%的短跑候选必须正式验证；不再重试
+same-rank direct copy。保留原buffered local transfer和O78+O79生产版本。
+
+## 下一步
+
+1. O83已否决简单负载重映射，R84否决本地direct copy；通信方向只剩对remote
+   data_packer measure pass做低风险计数缓存，但必须先证明其独立占比足够。
+2. 当前正式演化约468--470秒，下一轮优先重新采集生产版本perf热点；不要把Waitall
+   汇总值当成独立可消除时间。
+3. 正式OJ仍需验证O78+O79的约30秒TwoPuncture与当前ABE组合，目标是稳定低于
+   用户报告的469.932秒，而非追逐短跑亚1%信号。
