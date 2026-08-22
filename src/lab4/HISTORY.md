@@ -4937,3 +4937,67 @@ profiler 证据：`data_packer` 占 4.48% inclusive（O40 版 perf 数据）。�
    正式 t=40 长跑验证确认正确性和性能。
 3. ABE 侧优化已接近天花板：MPI 等待 ~23.6%（不可优化）、差分 kernel ~17%
    （R6/O24 失败）、compute_rhs ~21.6%（O15-O18 已优化）。
+
+## 正式 t=40 验证与性能采样（O78+O79）
+
+### 正式 t=40 运行
+
+日期：2026-08-22。
+
+计算节点正式 `t=40` 运行（无 cache，30 MPI × 2 OMP，owner-local 16 线程）：
+
+| 指标 | 结果 |
+|------|------:|
+| Total Evolve Time | **448.636 s** |
+| ABE Total Running | 452.089 s |
+| This Program Cost | **477.881 s** |
+| per-step (wall) | ~11.2 s |
+| TwoPuncture 时间 | ~26 s（从 O16 fallback 日志推算） |
+
+对比 O72 版本 t=40（Total Evolve ~470-477s, Program Cost ~481-563s）：
+- Total Evolve 减少 ~22-28s（5-6%），全部来自 TwoPuncture 阶段
+- ABE Total Evolve 持平（~448s vs ~470s），与 t=10 A/B 结论一致
+
+正确性：
+- Constraints: PASS（Ham=0.278, Px=0.028, Py=0.031, Pz=0.027，均 ≤ 2.0）
+- Trajectory: "FAIL" — 仅因 golden 包含 100 个时间点（t=0-99），CPU 只跑到 t=40
+  （40/100 matched），属于覆盖范围不匹配，不是数值误差。正式评测使用 t<40 截断
+  golden 检查。
+
+### perf stat 采样（t=2, --twop-cache）
+
+| 指标 | O78+O79 | O39/O40 时代 | 说明 |
+|------|---------|-------------|------|
+| IPC | 1.73 | ~2.13 (bind-to core) | unbound 调度下 IPC 低但吞吐高 |
+| branch miss | 0.38% | 0.82% | 更低 |
+| L1D miss | 1.98% | 0.13% | unbound 下 cache 局部性差但总时间更优 |
+| LLC miss | 47.59% | 37.31% | page cache 污染影响 |
+| CPUs utilized | 37.0 | 3.9 (devpod) | 计算节点 30 MPI × 2 OMP |
+
+注意：`perf record` 因容器 mlock 限制无法使用。旧 perf.data（O39/O40 时代）的
+self 热点排名仍适用于当前 ABE 代码（O78+O79 未修改任何 ABE 源文件）。
+
+### ABE self 热点排名（来自 O39/O40 perf.data，仍适用）
+
+| 排名 | 占比 | 符号 | 状态 |
+|------|------|------|------|
+| 1 | 12.33% | compute_rhs_bssn_._omp_fn.5 (Ricci workshare) | O15-O18 已优化 |
+| 2 | 10.13% | lopsided_kodis_._omp_fn.0 | R6/O24a/b/c 失败 |
+| 3 | 6.99% | fdderivs_._omp_fn.0 | R6/O45/O46 失败 |
+| 4 | 6.30% | compute_rhs_bssn_._omp_fn.1 | O15-O18 已优化 |
+| 5 | 6.07% | opal_progress (MPI) | O22/R73 不可优化 |
+| 6 | 5.67% | libgomp barrier (OpenMP) | O29/R82 不可优化 |
+| 7 | 5.28% | kernel sched_yield | MPI yield 副作用 |
+| 8 | 4.01% | __memcpy_sve | O12 部分优化 |
+| 9 | 3.68% | compute_rhs_bssn_._omp_fn.8 | O15-O18 已优化 |
+| 10 | 3.01% | prolong3_._omp_fn.0 | O30/O34 失败 |
+
+## 当前版本信息（最终）
+
+- Git commit: `1cf50fb`
+- 保留优化: O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20,
+  O26(E1+E3), O39, O48, O50, O54, O55, O62, O63, O64(诊断), O69, O70, O72, O78, O79
+- t=40 Total Evolve: 448.6s, Program Cost: 477.9s
+- t=10 端到端 A/B: 185.1s → 146.2s (-21.0%)
+- TwoPuncture: 69.5s → 30.5s (-56.1%)
+- 正确性: PASS (constraints 一致, trajectory 覆盖范围不匹配非数值误差)
