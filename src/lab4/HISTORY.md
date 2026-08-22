@@ -4898,3 +4898,42 @@ same-rank direct copy。保留原buffered local transfer和O78+O79生产版本�
    汇总值当成独立可消除时间。
 3. 正式OJ仍需验证O78+O79的约30秒TwoPuncture与当前ABE组合，目标是稳定低于
    用户报告的469.932秒，而非追逐短跑亚1%信号。
+
+### O85：data_packer measure pass 缓存
+
+状态：**已回退（t=10 A/B 退化 0.81%）**。
+
+日期：2026-08-22。
+
+profiler 证据：`data_packer` 占 4.48% inclusive（O40 版 perf 数据）。每次
+`transfer` 对每个 node 调用 3 次 `data_packer(0,...)` measure（data==NULL），
+遍历 gridseg 链表计算 `shape[0]*shape[1]*shape[2]`。
+
+修改文件和关键位置：
+- `src/Parallel.h`：gridseg 结构体新增 `cached_seg_size` 字段（默认 0）。
+- `src/Parallel.C` data_packer：data==NULL 时若 cached_seg_size>0 直接用缓存值，
+  跳过链表遍历。实际 pack 时填充缓存。
+- `src/Parallel.C` data_packermix：同样处理。
+
+计算节点 t=10 A/B（baseline = O78+O79, candidate = O78+O79+O85）：
+
+| 指标 | baseline 中位数 | O85 中位数 | 变化 |
+|------|---:|---:|---|
+| Program Cost | 146.73 s | 148.00 s | +0.87% |
+| Total Evolve | 115.003 s | 115.936 s | +0.81% |
+
+正确性 PASS（constraints 完全一致），但 Total Evolve 退化 0.81%。
+缓存查找的分支开销（每个 gridseg 节点增加一次 `cached_seg_size > 0` 判断）
+超过了消除 measure 遍历的收益。measure pass 的链表遍历本身很快
+（只计算整数乘法，无内存分配），不是瓶颈。
+
+决定：回退。当前保留优化不变：O78+O79。
+
+## 下一步
+
+1. O81/O85 均在 ABE/通信路径尝试消除冗余计算，但 t=10 均无收益或退化。
+   measure pass 和 BY_KKofxyz 的实际占比被 MPI 等待掩盖。
+2. 当前正式版本 O78+O79 已通过 t=10 验证（-21% 端到端），下一步应做
+   正式 t=40 长跑验证确认正确性和性能。
+3. ABE 侧优化已接近天花板：MPI 等待 ~23.6%（不可优化）、差分 kernel ~17%
+   （R6/O24 失败）、compute_rhs ~21.6%（O15-O18 已优化）。
