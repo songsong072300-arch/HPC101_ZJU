@@ -5124,3 +5124,30 @@ NRELAX≥250 后 BiCGStab 迭代数不再减少（预条件强度饱和）。继
 30×1 比 30×2 慢 2.5%（OpenMP 第二线程为 owner-local 表面积分提供并行）。
 20×3 大幅退化 88.6%（rank 数减少导致网格分解变化，owner-local 失效）。
 确认 30×2 是最优配置，与 R7 结论一致。
+
+### R90：PURE + CONTIGUOUS interface module（新建源文件）
+
+状态：**已回退（不可行——差分函数有副作用）**。
+
+日期：2026-08-22。
+
+动机：向量化报告显示 `bssn_rhs.f90` 有 149 处 "statement clobbers memory"，
+全部来自 fderivs/fdderivs/lopsided_kodis 调用。编译器无法证明这些调用
+不会修改周围数组，导致数组表达式循环无法向量化。
+
+尝试：创建 `src/diff_kernel_interfaces.f90` 新模块，声明 PURE + CONTIGUOUS
+的 explicit interface，让编译器知道这些函数不修改其他内存。
+
+失败原因：fderivs/fdderivs/lopsided_kodis 内部有：
+1. `allocatable, save :: fh` —— 持久状态，违反 PURE 约束
+2. `call symmetry_bd(...)` —— 调用有副作用的子程序
+3. `allocate/deallocate` —— 内存操作
+
+Fortran PURE 要求无 I/O、无副作用、无 SAVE 变量、不调用非 PURE 子程序。
+这些约束与差分 kernel 的实现不兼容。直接给子程序加 `pure` 属性编译报错。
+
+替代方案（也失败）：用 module 中的 dummy wrapper 提供 PURE interface，
+但 generic interface 覆盖需要修改 bssn_rhs.f90 为 module（大重构，高风险）。
+
+结论：无法通过新建源文件帮助编译器消除 "clobbers memory" 限制。差分 kernel
+的副作用（allocatable save + symmetry_bd 调用）是结构性限制。
