@@ -190,6 +190,16 @@ TwoPunctures::~TwoPunctures()
   delete[] pc_cos_cheb_extremes;
   delete[] pc_cos_fourft;
   delete[] pc_sin_fourft;
+  // O88: coordinate transform coefficients
+  delete[] pc_X_ij; delete[] pc_R_ij;
+  delete[] pc_A_X; delete[] pc_A_XX;
+  delete[] pc_B_R; delete[] pc_B_RR;
+  delete[] pc_cx; delete[] pc_cr;
+  delete[] pc_C_c_re; delete[] pc_C_c_im;
+  delete[] pc_C_cc_re; delete[] pc_C_cc_im;
+  delete[] pc_C_c2;
+  delete[] pc_sin_phi; delete[] pc_cos_phi;
+  delete[] pc_sin_2phi; delete[] pc_cos_2phi;
 }
 
 void TwoPunctures::Solve()
@@ -230,6 +240,9 @@ void TwoPunctures::Solve()
   }
 
   double tmp, Mp_adm, Mm_adm, Mp_adm_err, Mm_adm_err, up, um;
+
+  // O88: Precompute coordinate transform coefficients (atanh/atan/cosh/sinh/sin/cos).
+  precompute_coords(n1, n2, n3);
 
   double M_p = target_M_plus;
   double M_m = target_M_minus;
@@ -1239,6 +1252,82 @@ void TwoPunctures::rx3_To_xyz(int nvar, double x, double r, double phi,
   }
 }
 /* --------------------------------------------------------------------------*/
+void TwoPunctures::precompute_coords(int n1, int n2, int n3)
+{
+  int n12 = n1 * n2;
+  pc_X_ij = new double[n12];
+  pc_R_ij = new double[n12];
+  pc_A_X = new double[n12];
+  pc_A_XX = new double[n12];
+  pc_B_R = new double[n12];
+  pc_B_RR = new double[n12];
+  pc_cx = new double[n12];
+  pc_cr = new double[n12];
+  pc_C_c_re = new double[n12];
+  pc_C_c_im = new double[n12];
+  pc_C_cc_re = new double[n12];
+  pc_C_cc_im = new double[n12];
+  pc_C_c2 = new double[n12];
+
+  pc_sin_phi = new double[n3];
+  pc_cos_phi = new double[n3];
+  pc_sin_2phi = new double[n3];
+  pc_cos_2phi = new double[n3];
+
+  for (int i = 0; i < n1; i++)
+  {
+    double A = -pc_cos_al[i];
+    double At = 0.5 * (A + 1);
+    double X = 2.0 * atanh(At);
+    double A_X = 1.0 - At * At;
+    double A_XX = -At * A_X;
+
+    for (int j = 0; j < n2; j++)
+    {
+      double B = -pc_cos_be[j];
+      double R = Pih + 2.0 * atan(B);
+      double B_R = 0.5 * (1.0 + B * B);
+      double B_RR = B * B_R;
+
+      int idx = i * n2 + j;
+      pc_X_ij[idx] = X;
+      pc_R_ij[idx] = R;
+      pc_A_X[idx] = A_X;
+      pc_A_XX[idx] = A_XX;
+      pc_B_R[idx] = B_R;
+      pc_B_RR[idx] = B_RR;
+
+      // C_To_c: c = cosh(X+iR)*par_b
+      complex<double> C(X, R);
+      complex<double> c = cosh(C) * par_b;
+      complex<double> c_C = sinh(C) * par_b;
+      complex<double> c_CC = c;
+      complex<double> C_c = complex<double>(1, 0) / c_C;
+      complex<double> C_cc = -C_c * C_c * C_c * c_CC;
+      double C_c2 = abs(C_c);
+      C_c2 = C_c2 * C_c2;
+
+      pc_cx[idx] = real(c);
+      pc_cr[idx] = imag(c);
+      pc_C_c_re[idx] = real(C_c);
+      pc_C_c_im[idx] = imag(C_c);
+      pc_C_cc_re[idx] = real(C_cc);
+      pc_C_cc_im[idx] = imag(C_cc);
+      pc_C_c2[idx] = C_c2;
+    }
+  }
+
+  for (int k = 0; k < n3; k++)
+  {
+    double phi = 2.0 * Pi * k / n3;
+    double sp = sin(phi), cp = cos(phi);
+    pc_sin_phi[k] = sp;
+    pc_cos_phi[k] = cp;
+    pc_sin_2phi[k] = 2.0 * sp * cp;
+    pc_cos_2phi[k] = cp * cp - sp * sp;
+  }
+}
+/* --------------------------------------------------------------------------*/
 void TwoPunctures::Derivatives_AB3(int nvar, int n1, int n2, int n3, derivs v)
 {
   int N = maximum3(n1, n2, n3);
@@ -1445,39 +1534,110 @@ void TwoPunctures::F_of_v(int nvar, int n1, int n2, int n3, derivs v, double *F,
       {
         for (i = 0; i < n1; i++)
         {
-
-          al = Pih * (2 * i + 1) / n1;
+          int ij = i * n2 + j;
           A = -pc_cos_al[i];
-          be = Pih * (2 * j + 1) / n2;
           B = -pc_cos_be[j];
-          phi = 2. * Pi * k / n3;
+          double X = pc_X_ij[ij];
+          double R = pc_R_ij[ij];
+          x = pc_cx[ij];
+          r = pc_cr[ij];
+          double sp = pc_sin_phi[k];
+          double cp = pc_cos_phi[k];
+          double s2p = pc_sin_2phi[k];
+          double c2p = pc_cos_2phi[k];
+          y = r * cp;
+          z = r * sp;
+          double r_inv = 1.0 / r, r_inv2 = r_inv * r_inv;
+          double A_X = pc_A_X[ij], A_XX = pc_A_XX[ij];
+          double B_R = pc_B_R[ij], B_RR = pc_B_RR[ij];
+          double C_c_re = pc_C_c_re[ij], C_c_im = pc_C_c_im[ij];
+          double C_cc_re = pc_C_cc_re[ij], C_cc_im = pc_C_cc_im[ij];
+          double C_c2 = pc_C_c2[ij];
+          double sp2 = sp * sp, cp2 = cp * cp;
 
           Am1 = pc_Am1[i];
           for (ivar = 0; ivar < nvar; ivar++)
           {
             indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
-            U.d0[ivar] = Am1 * v.d0[indx];                    /* U*/
-            U.d1[ivar] = v.d0[indx] + Am1 * v.d1[indx];       /* U_A*/
-            U.d2[ivar] = Am1 * v.d2[indx];                    /* U_B*/
-            U.d3[ivar] = Am1 * v.d3[indx];                    /* U_3*/
-            U.d11[ivar] = 2 * v.d1[indx] + Am1 * v.d11[indx]; /* U_AA*/
-            U.d12[ivar] = v.d2[indx] + Am1 * v.d12[indx];     /* U_AB*/
-            U.d13[ivar] = v.d3[indx] + Am1 * v.d13[indx];     /* U_AB*/
-            U.d22[ivar] = Am1 * v.d22[indx];                  /* U_BB*/
-            U.d23[ivar] = Am1 * v.d23[indx];                  /* U_B3*/
-            U.d33[ivar] = Am1 * v.d33[indx];                  /* U_33*/
+            U.d0[ivar] = Am1 * v.d0[indx];
+            U.d1[ivar] = v.d0[indx] + Am1 * v.d1[indx];
+            U.d2[ivar] = Am1 * v.d2[indx];
+            U.d3[ivar] = Am1 * v.d3[indx];
+            U.d11[ivar] = 2 * v.d1[indx] + Am1 * v.d11[indx];
+            U.d12[ivar] = v.d2[indx] + Am1 * v.d12[indx];
+            U.d13[ivar] = v.d3[indx] + Am1 * v.d13[indx];
+            U.d22[ivar] = Am1 * v.d22[indx];
+            U.d23[ivar] = Am1 * v.d23[indx];
+            U.d33[ivar] = Am1 * v.d33[indx];
           }
-          /* Calculation of (X,R) and*/
-          /* (U_X, U_R, U_3, U_XX, U_XR, U_X3, U_RR, U_R3, U_33)*/
-          AB_To_XR(nvar, A, B, &X, &R, U);
-          /* Calculation of (x,r) and*/
-          /* (U, U_x, U_r, U_3, U_xx, U_xr, U_x3, U_rr, U_r3, U_33)*/
-          C_To_c(nvar, X, R, &x, &r, U);
-          /* Calculation of (y,z) and*/
-          /* (U, U_x, U_y, U_z, U_xx, U_xy, U_xz, U_yy, U_yz, U_zz)*/
-          rx3_To_xyz(nvar, x, r, phi, &y, &z, U);
+          // AB_To_XR inline
+          {
+            for (ivar = 0; ivar < nvar; ivar++)
+            {
+              U.d11[ivar] = A_X * A_X * U.d11[ivar] + A_XX * U.d1[ivar];
+              U.d12[ivar] = A_X * B_R * U.d12[ivar];
+              U.d13[ivar] = A_X * U.d13[ivar];
+              U.d22[ivar] = B_R * B_R * U.d22[ivar] + B_RR * U.d2[ivar];
+              U.d23[ivar] = B_R * U.d23[ivar];
+              U.d1[ivar] = A_X * U.d1[ivar];
+              U.d2[ivar] = B_R * U.d2[ivar];
+            }
+          }
+          // C_To_c inline
+          {
+            for (ivar = 0; ivar < nvar; ivar++)
+            {
+              double U_C13_re = 0.5 * U.d13[ivar], U_C13_im = -0.5 * U.d23[ivar];
+              double U_c13_re = U_C13_re * C_c_re - U_C13_im * C_c_im;
+              double U_c13_im = U_C13_re * C_c_im + U_C13_im * C_c_re;
+              U.d13[ivar] = 2. * U_c13_re;
+              U.d23[ivar] = -2. * U_c13_im;
+
+              double U_C1_re = 0.5 * U.d1[ivar], U_C1_im = -0.5 * U.d2[ivar];
+              double U_c1_re = U_C1_re * C_c_re - U_C1_im * C_c_im;
+              double U_c1_im = U_C1_re * C_c_im + U_C1_im * C_c_re;
+              U.d1[ivar] = 2. * U_c1_re;
+              U.d2[ivar] = -2. * U_c1_im;
+
+              double U_CC_re = 0.25 * (U.d11[ivar] - U.d22[ivar]);
+              double U_CC_im = -0.5 * U.d12[ivar];
+              double U_CB = 0.25 * (U.d11[ivar] + U.d22[ivar]);
+              double U_cb = U_CB * C_c2;
+              double U_cc_re = C_cc_re * U_C1_re - C_cc_im * U_C1_im
+                            + (C_c_re * C_c_re - C_c_im * C_c_im) * U_CC_re
+                            - (2. * C_c_re * C_c_im) * U_CC_im;
+              double U_xx = 2 * (U_cb + U_cc_re);
+              double U_rr = 2 * (U_cb - U_cc_re);
+              U.d11[ivar] = U_xx;
+              U.d22[ivar] = U_rr;
+              U.d12[ivar] = -2. * (C_cc_re * U_C1_im + C_cc_im * U_C1_re
+                          + (2. * C_c_re * C_c_im) * U_CC_re
+                          + (C_c_re * C_c_re - C_c_im * C_c_im) * U_CC_im);
+            }
+          }
+          // rx3_To_xyz inline
+          {
+            for (ivar = 0; ivar < nvar; ivar++)
+            {
+              double U_x = U.d1[ivar], U_r = U.d2[ivar], U_3 = U.d3[ivar];
+              double U_xx = U.d11[ivar], U_xr = U.d12[ivar], U_x3 = U.d13[ivar];
+              double U_rr = U.d22[ivar], U_r3 = U.d23[ivar], U_33 = U.d33[ivar];
+              U.d1[ivar] = U_x;
+              U.d2[ivar] = U_r * cp - U_3 * r_inv * sp;
+              U.d3[ivar] = U_r * sp + U_3 * r_inv * cp;
+              U.d11[ivar] = U_xx;
+              U.d12[ivar] = U_xr * cp - U_x3 * r_inv * sp;
+              U.d13[ivar] = U_xr * sp + U_x3 * r_inv * cp;
+              U.d22[ivar] = U_rr * cp2 + r_inv2 * sp2 * (U_33 + r * U_r)
+                          + s2p * r_inv2 * (U_3 - r * U_r3);
+              U.d23[ivar] = 0.5 * s2p * (U_rr - r_inv * U_r - r_inv2 * U_33)
+                          - c2p * r_inv2 * (U_3 - r * U_r3);
+              U.d33[ivar] = U_rr * sp2 + r_inv2 * cp2 * (U_33 + r * U_r)
+                          - s2p * r_inv2 * (U_3 - r * U_r3);
+            }
+          }
           NonLinEquations(sources[Index(0, i, j, k, 1, n1, n2, n3)],
-                          A, B, X, R, x, r, phi, y, z, U, values);
+                          A, B, X, R, x, r, 2. * Pi * k / n3, y, z, U, values);
           for (ivar = 0; ivar < nvar; ivar++)
           {
             indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
@@ -1916,48 +2076,117 @@ void TwoPunctures::J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, doubl
       {
         for (i = 0; i < n1; i++)
         {
-
-          al = Pih * (2 * i + 1) / n1;
+          int ij = i * n2 + j;
           A = -pc_cos_al[i];
-          be = Pih * (2 * j + 1) / n2;
           B = -pc_cos_be[j];
-          phi = 2. * Pi * k / n3;
+          double X = pc_X_ij[ij];
+          double R = pc_R_ij[ij];
+          x = pc_cx[ij];
+          r = pc_cr[ij];
+          double sp = pc_sin_phi[k];
+          double cp = pc_cos_phi[k];
+          double s2p = pc_sin_2phi[k];
+          double c2p = pc_cos_2phi[k];
+          y = r * cp;
+          z = r * sp;
+          double r_inv = 1.0 / r, r_inv2 = r_inv * r_inv;
+          double A_X = pc_A_X[ij], A_XX = pc_A_XX[ij];
+          double B_R = pc_B_R[ij], B_RR = pc_B_RR[ij];
+          double C_c_re = pc_C_c_re[ij], C_c_im = pc_C_c_im[ij];
+          double C_cc_re = pc_C_cc_re[ij], C_cc_im = pc_C_cc_im[ij];
+          double C_c2 = pc_C_c2[ij];
+          double sp2 = sp * sp, cp2 = cp * cp;
 
           Am1 = pc_Am1[i];
           for (ivar = 0; ivar < nvar; ivar++)
           {
             indx = Index(ivar, i, j, k, nvar, n1, n2, n3);
-            dU.d0[ivar] = Am1 * dv.d0[indx];                     /* dU*/
-            dU.d1[ivar] = dv.d0[indx] + Am1 * dv.d1[indx];       /* dU_A*/
-            dU.d2[ivar] = Am1 * dv.d2[indx];                     /* dU_B*/
-            dU.d3[ivar] = Am1 * dv.d3[indx];                     /* dU_3*/
-            dU.d11[ivar] = 2 * dv.d1[indx] + Am1 * dv.d11[indx]; /* dU_AA*/
-            dU.d12[ivar] = dv.d2[indx] + Am1 * dv.d12[indx];     /* dU_AB*/
-            dU.d13[ivar] = dv.d3[indx] + Am1 * dv.d13[indx];     /* dU_AB*/
-            dU.d22[ivar] = Am1 * dv.d22[indx];                   /* dU_BB*/
-            dU.d23[ivar] = Am1 * dv.d23[indx];                   /* dU_B3*/
-            dU.d33[ivar] = Am1 * dv.d33[indx];                   /* dU_33*/
-            U.d0[ivar] = u.d0[indx];                             /* U   */
-            U.d1[ivar] = u.d1[indx];                             /* U_x*/
-            U.d2[ivar] = u.d2[indx];                             /* U_y*/
-            U.d3[ivar] = u.d3[indx];                             /* U_z*/
-            U.d11[ivar] = u.d11[indx];                           /* U_xx*/
-            U.d12[ivar] = u.d12[indx];                           /* U_xy*/
-            U.d13[ivar] = u.d13[indx];                           /* U_xz*/
-            U.d22[ivar] = u.d22[indx];                           /* U_yy*/
-            U.d23[ivar] = u.d23[indx];                           /* U_yz*/
-            U.d33[ivar] = u.d33[indx];                           /* U_zz*/
+            dU.d0[ivar] = Am1 * dv.d0[indx];
+            dU.d1[ivar] = dv.d0[indx] + Am1 * dv.d1[indx];
+            dU.d2[ivar] = Am1 * dv.d2[indx];
+            dU.d3[ivar] = Am1 * dv.d3[indx];
+            dU.d11[ivar] = 2 * dv.d1[indx] + Am1 * dv.d11[indx];
+            dU.d12[ivar] = dv.d2[indx] + Am1 * dv.d12[indx];
+            dU.d13[ivar] = dv.d3[indx] + Am1 * dv.d13[indx];
+            dU.d22[ivar] = Am1 * dv.d22[indx];
+            dU.d23[ivar] = Am1 * dv.d23[indx];
+            dU.d33[ivar] = Am1 * dv.d33[indx];
+            U.d0[ivar] = u.d0[indx];
+            U.d1[ivar] = u.d1[indx];
+            U.d2[ivar] = u.d2[indx];
+            U.d3[ivar] = u.d3[indx];
+            U.d11[ivar] = u.d11[indx];
+            U.d12[ivar] = u.d12[indx];
+            U.d13[ivar] = u.d13[indx];
+            U.d22[ivar] = u.d22[indx];
+            U.d23[ivar] = u.d23[indx];
+            U.d33[ivar] = u.d33[indx];
           }
-          /* Calculation of (X,R) and*/
-          /* (dU_X, dU_R, dU_3, dU_XX, dU_XR, dU_X3, dU_RR, dU_R3, dU_33)*/
-          AB_To_XR(nvar, A, B, &X, &R, dU);
-          /* Calculation of (x,r) and*/
-          /* (dU, dU_x, dU_r, dU_3, dU_xx, dU_xr, dU_x3, dU_rr, dU_r3, dU_33)*/
-          C_To_c(nvar, X, R, &x, &r, dU);
-          /* Calculation of (y,z) and*/
-          /* (dU, dU_x, dU_y, dU_z, dU_xx, dU_xy, dU_xz, U_yy, dU_yz, dU_zz)*/
-          rx3_To_xyz(nvar, x, r, phi, &y, &z, dU);
-          LinEquations(A, B, X, R, x, r, phi, y, z, dU, U, values);
+          // AB_To_XR inline (on dU)
+          {
+            for (ivar = 0; ivar < nvar; ivar++)
+            {
+              dU.d11[ivar] = A_X * A_X * dU.d11[ivar] + A_XX * dU.d1[ivar];
+              dU.d12[ivar] = A_X * B_R * dU.d12[ivar];
+              dU.d13[ivar] = A_X * dU.d13[ivar];
+              dU.d22[ivar] = B_R * B_R * dU.d22[ivar] + B_RR * dU.d2[ivar];
+              dU.d23[ivar] = B_R * dU.d23[ivar];
+              dU.d1[ivar] = A_X * dU.d1[ivar];
+              dU.d2[ivar] = B_R * dU.d2[ivar];
+            }
+          }
+          // C_To_c inline (on dU)
+          {
+            for (ivar = 0; ivar < nvar; ivar++)
+            {
+              double dU_C13_re = 0.5 * dU.d13[ivar], dU_C13_im = -0.5 * dU.d23[ivar];
+              double dU_c13_re = dU_C13_re * C_c_re - dU_C13_im * C_c_im;
+              double dU_c13_im = dU_C13_re * C_c_im + dU_C13_im * C_c_re;
+              dU.d13[ivar] = 2. * dU_c13_re;
+              dU.d23[ivar] = -2. * dU_c13_im;
+
+              double dU_C1_re = 0.5 * dU.d1[ivar], dU_C1_im = -0.5 * dU.d2[ivar];
+              double dU_c1_re = dU_C1_re * C_c_re - dU_C1_im * C_c_im;
+              double dU_c1_im = dU_C1_re * C_c_im + dU_C1_im * C_c_re;
+              dU.d1[ivar] = 2. * dU_c1_re;
+              dU.d2[ivar] = -2. * dU_c1_im;
+
+              double dU_CC_re = 0.25 * (dU.d11[ivar] - dU.d22[ivar]);
+              double dU_CC_im = -0.5 * dU.d12[ivar];
+              double dU_CB = 0.25 * (dU.d11[ivar] + dU.d22[ivar]);
+              double dU_cb = dU_CB * C_c2;
+              double dU_cc_re = C_cc_re * dU_C1_re - C_cc_im * dU_C1_im
+                            + (C_c_re * C_c_re - C_c_im * C_c_im) * dU_CC_re
+                            - (2. * C_c_re * C_c_im) * dU_CC_im;
+              dU.d11[ivar] = 2 * (dU_cb + dU_cc_re);
+              dU.d22[ivar] = 2 * (dU_cb - dU_cc_re);
+              dU.d12[ivar] = -2. * (C_cc_re * dU_C1_im + C_cc_im * dU_C1_re
+                          + (2. * C_c_re * C_c_im) * dU_CC_re
+                          + (C_c_re * C_c_re - C_c_im * C_c_im) * dU_CC_im);
+            }
+          }
+          // rx3_To_xyz inline (on dU)
+          {
+            for (ivar = 0; ivar < nvar; ivar++)
+            {
+              double dU_x = dU.d1[ivar], dU_r = dU.d2[ivar], dU_3 = dU.d3[ivar];
+              double dU_xx = dU.d11[ivar], dU_xr = dU.d12[ivar], dU_x3 = dU.d13[ivar];
+              double dU_rr = dU.d22[ivar], dU_r3 = dU.d23[ivar], dU_33 = dU.d33[ivar];
+              dU.d1[ivar] = dU_x;
+              dU.d2[ivar] = dU_r * cp - dU_3 * r_inv * sp;
+              dU.d3[ivar] = dU_r * sp + dU_3 * r_inv * cp;
+              dU.d11[ivar] = dU_xx;
+              dU.d12[ivar] = dU_xr * cp - dU_x3 * r_inv * sp;
+              dU.d13[ivar] = dU_xr * sp + dU_x3 * r_inv * cp;
+              dU.d22[ivar] = dU_rr * cp2 + r_inv2 * sp2 * (dU_33 + r * dU_r)
+                          + s2p * r_inv2 * (dU_3 - r * dU_r3);
+              dU.d23[ivar] = 0.5 * s2p * (dU_rr - r_inv * dU_r - r_inv2 * dU_33)
+                          - c2p * r_inv2 * (dU_3 - r * dU_r3);
+              dU.d33[ivar] = dU_rr * sp2 + r_inv2 * cp2 * (dU_33 + r * dU_r)
+                          - s2p * r_inv2 * (dU_3 - r * dU_r3);
+            }
+          }
+          LinEquations(A, B, X, R, x, r, 2. * Pi * k / n3, y, z, dU, U, values);
           for (ivar = 0; ivar < nvar; ivar++)
           {
             indx = Index(ivar, i, j, k, nvar, n1, n2, n3);

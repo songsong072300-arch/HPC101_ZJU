@@ -68,6 +68,19 @@ private:
         double *pc_sin_fourft;        // size n3*n3, sin(Pi/M * l * k)
         int pc_n_cheb_zeros, pc_n_cheb_extremes, pc_n_fourft;
 
+        // O88: Precomputed coordinate transform coefficients per (i,j).
+        // AB_To_XR/C_To_c produce these from atanh/atan/cosh/sinh;
+        // they depend only on fixed grid coords, not the evolving field.
+        double *pc_X_ij, *pc_R_ij;       // AB_To_XR outputs, size n1*n2
+        double *pc_A_X, *pc_A_XX;        // AB_To_XR chain rule coeffs, size n1*n2
+        double *pc_B_R, *pc_B_RR;        // AB_To_XR chain rule coeffs, size n1*n2
+        double *pc_cx, *pc_cr;           // C_To_c outputs (x,r), size n1*n2
+        double *pc_C_c_re, *pc_C_c_im;   // 1/c_C complex, size n1*n2
+        double *pc_C_cc_re, *pc_C_cc_im; // C_cc complex, size n1*n2
+        double *pc_C_c2;                 // |1/c_C|^2, size n1*n2
+        // rx3_To_xyz trig per k, size n3
+        double *pc_sin_phi, *pc_cos_phi, *pc_sin_2phi, *pc_cos_2phi;
+
        struct parameters
        {
               int nvar, n1, n2, n3;
@@ -142,6 +155,7 @@ public:
        double BY_KKofxyz(double x, double y, double z);
        void SetMatrix_JFD(int nvar, int n1, int n2, int n3, derivs u, int *ncols, int **cols, double **Matrix);
        void J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, double *Jdv, derivs u);
+       void precompute_coords(int n1, int n2, int n3);
        void relax(double *dv, int const nvar, int const n1, int const n2, int const n3,
                   double const *rhs, int const *ncols, int **cols, double **JFD);
        void LineRelax_be(double *dv,

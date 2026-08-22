@@ -5047,3 +5047,43 @@ devpod 4 线程正确性：BiCGStab 91 次（vs NRELAX=250 的 85 次），总 s
 
 ABE 侧所有优化方向已穷尽（计算 kernel、通信、编译选项、内存操作）。
 TwoPuncture 侧 LineRelax+Thomas 占 85%（~25s），NRELAX 微调无稳定收益。
+
+### O88：预计算坐标变换系数（precompute_coords）
+
+状态：**保留；t=10 A/B 三轮方向一致，TwoPuncture -16.3%**。
+
+日期：2026-08-22。
+
+profiler 证据：F_of_v 和 J_times_dv 中每个 (i,j,k) 调用 `AB_To_XR → C_To_c →
+rx3_To_xyz`，这些函数计算 `atanh`/`atan`/`cosh`/`sinh`/`sin`/`cos` 等超越函数。
+这些值只依赖固定网格坐标 (i,j,k) 和 par_b，在所有 Newton/BiCGStab 迭代中不变。
+
+修改文件和关键位置：
+- `src/TwoPunctures.h`：新增 17 个预计算数组（pc_X_ij, pc_R_ij, pc_A_X, pc_A_XX,
+  pc_B_R, pc_B_RR, pc_cx, pc_cr, pc_C_c_re/im, pc_C_cc_re/im, pc_C_c2,
+  pc_sin_phi, pc_cos_phi, pc_sin_2phi, pc_cos_2phi）。
+- `src/TwoPunctures.C`：新增 `precompute_coords`（在 Solve() 中调用一次）。
+- `src/TwoPunctures.C` F_of_v：AB_To_XR/C_To_c/rx3_To_xyz 替换为 inline
+  使用预计算系数，消除 atanh/atan/cosh/sinh/sin/cos 调用。
+- `src/TwoPunctures.C` J_times_dv：同样 inline 替换。
+- 析构函数释放新数组。
+
+注意：`C_To_c` 使用 `std::complex<double>`，inline 版本手动展开复数运算为
+实数乘加，避免 complex 构造和析构开销。
+
+devpod 4 线程正确性：BiCGStab 86 次（vs 85），Ansorg.psid max rel 1.44e-12，
+puncture params 位级一致。
+
+计算节点 t=10 A/B（baseline = O78+O79, candidate = O78+O79+O88，3 轮交替）：
+
+| 指标 | baseline 中位数 | O88 中位数 | 变化 |
+|------|---:|---:|---|
+| Program Cost | 147.91 s | 141.71 s | **-4.19%** |
+| Total Evolve | 115.741 s | 115.436 s | -0.26%（持平） |
+| TwoPuncture+overhead | 32.24 s | 26.97 s | **-5.27s (-16.3%)** |
+
+3 轮全部更快，方向一致。正确性 PASS（constraints 完全一致）。
+
+当前保留优化：O1, O5, O6, O7, O8, O9, O12, O13, O15, O16, O17, O18, O19, O20,
+O26(E1+E3), O39, O48, O50, O54, O55, O62, O63, O64(诊断), O69, O70, O72, O78,
+O79, O88
